@@ -1,3 +1,11 @@
+# Folders
+full_videos/
+agenda_clips/
+tmp/
+
+# Test files 
+test.json
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
