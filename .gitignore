@@ -2,6 +2,8 @@
 full_videos/
 agenda_clips/
 tmp/
+iframe_figures/
+temp/
 
 # Test files 
 test.json
