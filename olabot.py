@@ -265,7 +265,7 @@ class OLABot:
 
         response = self.small_model.generate_content(prompt)
         decision = response.text.strip()
-        self._print_debug(self._parse_usage(response.usage_metadata))
+        self._print_debug(self._format_usage_stats(response.usage_metadata))
         self._print_debug(f"Checking context relevance decision: {decision}")
         return decision == "USE_CURRENT_CONTEXT"
 
