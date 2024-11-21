@@ -32,7 +32,7 @@ class OLABot:
             self.transcript_topics,
             self.transcript_bills,
             self.transcript_summaries,
-        ) = self.generate_transcript_summaries()
+        ) = self._generate_transcript_summaries()
 
         # Initialize Gemini
         genai.configure(api_key=GEMINI_API_KEY)
@@ -70,8 +70,10 @@ class OLABot:
         # whether in debug mode
         self.debug = debug
 
+    #
     # TRANSCRIPT SUMMARIES
-    def generate_transcript_summaries(self) -> tuple:
+    #
+    def _generate_transcript_summaries(self) -> tuple:
         """Process and store topics and speakers for each transcript."""
         transcript_topics = {}
         transcript_speakers = {}
@@ -190,7 +192,7 @@ class OLABot:
     #
     # CONTEXT METHODS
     #
-    def update_current_context(self, dates: list[str]) -> None:
+    def _update_current_context(self, dates: list[str]) -> None:
         """Update the current transcript context."""
         # TODO this should update the context in gemini
         # TODO warning if dates > max transcript context
@@ -202,7 +204,7 @@ class OLABot:
             ],
         )
 
-    def check_context_relevance(self, question: str) -> bool:
+    def _check_context_relevance(self, question: str) -> bool:
         """Check if the current transcript context can answer the new question.
 
         Takes into account recent conversation history.
@@ -269,7 +271,7 @@ class OLABot:
     #
     # ROUTING METHODS
     #
-    def route_question(self, question: str) -> dict:
+    def _route_question(self, question: str) -> dict:
         """Determine what type of question and which transcripts to load."""
         prompt = f"""
         Analyze this question about the Ontario Legislature:
@@ -332,7 +334,7 @@ class OLABot:
     #
     # FILTERING METHODS
     #
-    def select_relevant_transcripts(self, routing_analysis: dict) -> list[str]:
+    def _select_relevant_transcripts(self, routing_analysis: dict) -> list[str]:
         """Select relevant transcripts based on question and available transcripts."""
         dates = self.available_dates
 
@@ -385,9 +387,10 @@ class OLABot:
         self.print_debug(f"Selected dates: {relevant_dates}")
         return relevant_dates
 
+    #
     # RESPONSE GENERATION METHODS
-
-    def generate_response(self, question: str) -> str:
+    #
+    def _generate_response(self, question: str) -> str:
         """Generate response using selected transcripts."""
         # Get recent conversation context
         recent_exchanges = self.conversation_history[
@@ -433,8 +436,8 @@ class OLABot:
 
         response = self.model.generate_content(prompt, stream=False)
         # streaming
-        #response = self.model.generate_content(prompt, stream=True)
-        #return response
+        # response = self.model.generate_content(prompt, stream=True)
+        # return response
 
         self.print_usage_stats(response.usage_metadata, "Generating response")
         response_text = response.text
@@ -450,19 +453,19 @@ class OLABot:
         """Main chat interface."""
         try:
             # Check if current context is relevant
-            if self.check_context_relevance(question):
+            if self._check_context_relevance(question):
                 self.print_debug("Using cached context")
-                return self.generate_response(question)
+                return self._generate_response(question)
             else:
                 self.print_debug("Fetching new context")
-                routing = self.route_question(question)
-                relevant_dates = self.select_relevant_transcripts(routing)
-                self.update_current_context(relevant_dates)
+                routing = self._route_question(question)
+                relevant_dates = self._select_relevant_transcripts(routing)
+                self._update_current_context(relevant_dates)
 
                 if not relevant_dates:
                     return "I couldn't find any relevant discussions in the available transcripts."
 
-                return self.generate_response(question)
+                return self._generate_response(question)
 
         except Exception as e:  # FIXME what kind of exception?
             return f"{Fore.RED}Sorry, I encountered an error: {e!s}{Style.RESET_ALL}"
@@ -483,7 +486,7 @@ def main():
         response = bot.chat(question)
         bot.print_response(response)
         # streaming
-        #for chunk in response:
+        # for chunk in response:
         #    bot.print_response(chunk.text)
 
 
