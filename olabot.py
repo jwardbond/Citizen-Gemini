@@ -431,7 +431,11 @@ class OLABot:
         {transcript_content}
         """
 
-        response = self.model.generate_content(prompt)
+        response = self.model.generate_content(prompt, stream=False)
+        # streaming
+        #response = self.model.generate_content(prompt, stream=True)
+        #return response
+
         self.print_usage_stats(response.usage_metadata, "Generating response")
         response_text = response.text
 
@@ -478,6 +482,9 @@ def main():
         bot.print_question(question)
         response = bot.chat(question)
         bot.print_response(response)
+        # streaming
+        #for chunk in response:
+        #    bot.print_response(chunk.text)
 
 
 if __name__ == "__main__":
