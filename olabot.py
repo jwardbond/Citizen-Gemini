@@ -1,3 +1,4 @@
+import inspect
 import json
 import os
 import re
@@ -5,10 +6,9 @@ from pathlib import Path
 
 import dotenv
 import google.generativeai as genai
-from colorama import Back, Fore, Style, init
+from colorama import Back, Fore, Style
 
 dotenv.load_dotenv()
-init()  # Initialize colorama
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
@@ -154,25 +154,29 @@ class OLABot:
     #
     # PRINTING METHODS
     #
-    def print_debug(self, message: str) -> None:
+    def _print_debug(self, message: str) -> None:
         """Print debug messages in dim yellow."""
         if self.debug:
             print(f"{Fore.YELLOW}{Style.DIM}Debug - {message}{Style.RESET_ALL}")
 
-    def print_usage_stats(self, usage_stats, operation_name: str = "") -> None:
-        """Prints formatted usage statistics for a Gemini API call using print_debug.
+    def _format_usage_stats(self, usage_stats: dict) -> None:
+        """Prints formatted usage statistics for a Gemini API call using _print_debug.
 
         Args:
             usage_stats: The usage_metadata from a Gemini response
-            operation_name (str, Optional): Name of the operation (e.g., "Routing", "Context Selection")
         """
+        operation_name = (
+            f"{Fore.RED}{Style.DIM}{inspect.stack()[1][3]}{Fore.YELLOW}{Style.DIM}"
+        )
+
         stats_message = (
             f"{operation_name} usage stats:\n"
             f"\tprompt_token_count: {usage_stats.prompt_token_count}\n"
             f"\tcandidates_token_count: {usage_stats.candidates_token_count}\n"
             f"\ttotal_token_count: {usage_stats.total_token_count}"
         )
-        self.print_debug(stats_message)
+
+        return stats_message
 
     def print_welcome(self) -> None:
         """Print welcome message."""
@@ -205,10 +209,7 @@ class OLABot:
         )
 
     def _check_context_relevance(self, question: str) -> bool:
-        """Check if the current transcript context can answer the new question.
-
-        Takes into account recent conversation history.
-        """
+        """Check if the current context can answer the new question."""
         # No context to answer the question
         if self.current_context == "":
             return False
@@ -263,9 +264,9 @@ class OLABot:
         """
 
         response = self.small_model.generate_content(prompt)
-        self.print_usage_stats(response.usage_metadata, "Checking context relevance")
         decision = response.text.strip()
-        self.print_debug(f"Checking context relevance decision: {decision}")
+        self._print_debug(self._parse_usage(response.usage_metadata))
+        self._print_debug(f"Checking context relevance decision: {decision}")
         return decision == "USE_CURRENT_CONTEXT"
 
     #
@@ -300,8 +301,8 @@ class OLABot:
         """
 
         response = self.small_model.generate_content(prompt)
-        self.print_usage_stats(response.usage_metadata, "Routing")
         response_text = response.text
+
         try:
             # Clean the response text
             response_text = response_text.strip()
@@ -318,7 +319,8 @@ class OLABot:
             routing["people"] = routing.get("people", [])
             routing["bill_number"] = routing.get("bill_number", [])
 
-            self.print_debug(f"Final routing: {routing}")  # Debug print
+            self._print_debug(self._format_usage_stats(response.usage_metadata))
+            self._print_debug(f"Final routing: {routing}")
             return routing
 
         except json.JSONDecodeError:
@@ -378,13 +380,13 @@ class OLABot:
         """
 
         response = self.small_model.generate_content(prompt)
-        self.print_usage_stats(response.usage_metadata, "Selecting relevant dates")
         response_text = response.text
         relevant_dates = [date for date in response_text.split("\n") if date in dates][
             : self.MAX_TRANSCRIPT_CONTEXT
         ]
 
-        self.print_debug(f"Selected dates: {relevant_dates}")
+        self._print_debug(self._format_usage_stats(response.usage_metadata))
+        self._print_debug(f"Selected dates: {relevant_dates}")
         return relevant_dates
 
     #
@@ -438,8 +440,6 @@ class OLABot:
         # streaming
         # response = self.model.generate_content(prompt, stream=True)
         # return response
-
-        self.print_usage_stats(response.usage_metadata, "Generating response")
         response_text = response.text
 
         # Store this exchange in history
@@ -447,6 +447,7 @@ class OLABot:
             {"question": question, "response": response_text},
         )
 
+        self._print_debug(self._format_usage_stats(response.usage_metadata))
         return response_text
 
     def chat(self, question: str) -> str:
@@ -454,10 +455,10 @@ class OLABot:
         try:
             # Check if current context is relevant
             if self._check_context_relevance(question):
-                self.print_debug("Using cached context")
+                self._print_debug("Using cached context")
                 return self._generate_response(question)
             else:
-                self.print_debug("Fetching new context")
+                self._print_debug("Fetching new context")
                 routing = self._route_question(question)
                 relevant_dates = self._select_relevant_transcripts(routing)
                 self._update_current_context(relevant_dates)
