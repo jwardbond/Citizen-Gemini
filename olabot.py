@@ -323,23 +323,16 @@ class OLABot:
                 self.current_context_cache.delete()
                 self._print_debug("Deleted old cache")
 
-            # Create new cache for main model with updated transcripts
-            self.current_context_cache = caching.CachedContent.create(
-                model = 'models/gemini-1.5-flash-002',
-                display_name = 'OLABot Current Transcripts',
-                contents = [self.current_context],
-                ttl = datetime.timedelta(minutes=self.CACHE_TTL_MINUTES)
+            # Create new model using helper function
+            self.model, self.current_context_cache = self._create_cached_model(
+                model_name='models/gemini-1.5-flash-002',
+                display_name='OLABot Current Transcripts',
+                contents=[self.current_context],
+                temperature=1,
+                max_output_tokens=8192
             )
-            # Update main model with new cached context
-            self.model = genai.GenerativeModel.from_cached_content(
-                cached_content = self.current_context_cache,
-                generation_config={
-                    "temperature": 1,
-                    "top_p": 0.95,
-                    "max_output_tokens": 8192,
-                    "response_mime_type": "text/plain",
-                }
-            )
+
+            # Initialize chat with new context and previous history
             self._initialize_chat(previous_history)
             self._print_debug("Updated main model with new cached context")
         except Exception as e:
