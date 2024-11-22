@@ -310,15 +310,20 @@ class OLABot:
         "{question}"
 
         Select the most relevant transcript dates from these summaries that would help answer the question.
-        Consider:
-        1. Speakers mentioned
-        2. Topics and their semantic similarities
-        3. Bill discussions
-        4. Most recent dates if everything else is equal
-        5. Date ranges if mentioned in the question
+        IMPORTANT: Strongly prefer the most recent transcripts unless there is a compelling reason to use older ones.
+
+        Consider in order of priority:
+        1. Most recent dates that contain relevant information
+        2. Explicit date references in the question
+        3. Speakers mentioned
+        4. Topics and their semantic similarities
+        5. Bill discussions
+
+        Only use older transcripts if they contain significantly more relevant information than recent ones.
 
         Return ONLY the dates, one per line, in the format YYYY-MM-DD.
         Limit your response to {self.MAX_TRANSCRIPT_CONTEXT} dates maximum.
+        Start with the most recent relevant dates.
         """
 
         # get most recent relevant
