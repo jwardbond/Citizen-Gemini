@@ -66,7 +66,7 @@ class OLABot:
             }
         )
 
-        # Initialize Gemini small model -- used for checking current context relevance
+        # Initialize Gemini small model -- NOTE: not used rn
         self.small_model = genai.GenerativeModel(
             model_name="gemini-1.5-flash-8b",
             generation_config={
@@ -252,14 +252,6 @@ class OLABot:
             ],
         )
 
-        # Create a condensed representation of available transcripts
-        transcript_content = "\n\n".join(
-            [
-                f"**{date}**:\n{self.transcript_summaries[date]}"
-                for date in self.current_dates
-            ],
-        )
-
         prompt = f"""
         Given this new question about the Ontario Legislature:
         "{question}"
@@ -267,10 +259,12 @@ class OLABot:
         Recent conversation history:
         {conversation_context}
 
-        Current transcript summaries:
-        {transcript_content}
+        Current transcripts:
+        {', '.join(self.current_dates)}
 
-        Analyze if the current transcripts can answer this question or if we need new ones. Use the following guidelines:
+        Read the question, the conversation history, and the given transcripts.
+        Analyze if the current transcripts can answer this question or if we need new ones.
+        Use the following guidelines:
 
         1. USE_CURRENT_CONTEXT if:
            - Question follows naturally from conversation history
@@ -292,7 +286,7 @@ class OLABot:
         Return ONLY one of these: USE_CURRENT_CONTEXT or NEED_NEW_CONTEXT
         """
 
-        response = self.small_model.generate_content(prompt)
+        response = self.retrieval_model.generate_content(prompt)
         decision = response.text.strip()
         self._print_debug(self._format_usage_stats(response.usage_metadata))
         self._print_debug(f"Checking context relevance decision: {decision}")
