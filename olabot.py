@@ -3,19 +3,45 @@ import json
 import os
 import re
 from pathlib import Path
-
+from typing import Union, Generator
 import dotenv
 import google.generativeai as genai
+from google.generativeai import caching
 from colorama import Back, Fore, Style
+import datetime
 
 dotenv.load_dotenv()
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+genai.configure(api_key=GEMINI_API_KEY)
 
+
+"""Some Gemini helper functions"""
+def list_models():
+    for m in genai.list_models():
+        print(f"Model name: {m.name}")
+        print(f"Display name: {m.display_name}")
+        print(f"Description: {m.description}")
+        print(f"Supported generation methods: {m.supported_generation_methods}")
+        print("---")
+
+def delete_all_caches():
+    for c in caching.CachedContent.list():
+        c.delete()
 
 class OLABot:
-    def __init__(self, hansard_path: Path, debug: bool = False):
+    def __init__(self, hansard_path: Path, debug: bool = False, streaming: bool = True):
         """Initialize the Ontario Legislature Assistant Bot."""
+        # some constants
+        self.MAX_CONVERSATION_HISTORY = 5  # Max number of previous Q/A pairs
+        self.MAX_TRANSCRIPT_CONTEXT = 5  # The number of transcript files
+        self.CACHE_TTL_MINUTES = 10  # Cache time-to-live in minutes
+
+        # some settings
+        self.debug = debug
+        self.streaming = streaming
+
+
         if not isinstance(hansard_path, Path):
             hansard_path = Path(hansard_path)
 
@@ -33,27 +59,25 @@ class OLABot:
             self.transcript_bills,
             self.transcript_summaries,
         ) = self._generate_transcript_summaries()
-
-        # Initialize Gemini
-        genai.configure(api_key=GEMINI_API_KEY)
-
-        self.model = genai.GenerativeModel(
-            model_name="gemini-1.5-flash",
-            generation_config={
-                "temperature": 1,
-                "top_p": 0.95,
-                "top_k": 64,
-                "max_output_tokens": 8192,
-                "response_mime_type": "text/plain",
-            },
+        self.transcript_condensed = "\n\n".join(
+            [f"**{date}**:\n{self.transcript_summaries[date]}" for date in self.available_dates]
         )
-        self.small_model = genai.GenerativeModel(
-            model_name="gemini-1.5-flash-8b",
-            generation_config={
-                "temperature": 1,
-                "max_output_tokens": 1024,
-                "response_mime_type": "text/plain",
-            },
+
+        # Initialize models
+        self.model, self.current_context_cache = self._create_cached_model(
+            model_name='models/gemini-1.5-flash-002',
+            display_name='OLABot Current Transcripts',
+            contents=[''],
+            temperature=1,
+            max_output_tokens=8192
+        )
+
+        self.retrieval_model, self.transcript_summaries_cache = self._create_cached_model(
+            model_name='models/gemini-1.5-flash-8b',
+            display_name='OLABot Transcript Summaries',
+            contents=[self.transcript_condensed],
+            temperature=1,
+            max_output_tokens=1024
         )
 
         # Initialize conversation history
@@ -62,13 +86,6 @@ class OLABot:
         # Initialize current transcript context
         self.current_dates = []
         self.current_context = ""
-
-        # some constants
-        self.MAX_CONVERSATION_HISTORY = 5  # Max number of previous Q/A pairs
-        self.MAX_TRANSCRIPT_CONTEXT = 5  # The number of transcript files
-
-        # whether in debug mode
-        self.debug = debug
 
     #
     # TRANSCRIPT SUMMARIES
@@ -188,18 +205,77 @@ class OLABot:
         """Print user question with styling."""
         print(f"\n{Fore.GREEN}❓ You: {Style.BRIGHT}{question}{Style.RESET_ALL}")
 
-    def print_response(self, response: str) -> None:
+    def print_response(self, response: str | Generator) -> None:
         """Print bot response with styling."""
-        print(f"\n{Fore.BLUE}🤖 Assistant: {Style.NORMAL}{response}{Style.RESET_ALL}\n")
-        print(f"{Style.DIM}---{Style.RESET_ALL}")  # Separator line
+        if self.streaming:
+            # Print assistant prefix only once
+            print(f"\n{Fore.BLUE}🤖 Assistant: {Style.NORMAL}", end="", flush=True)
+            for chunk in response:
+                print(f"{Fore.BLUE}{chunk}", end="", flush=True)
+            print(f"\n\n{Style.DIM}---{Style.RESET_ALL}")  # Separator line
+        else:
+            print(f"\n{Fore.BLUE}🤖 Assistant: {Style.NORMAL}{response}{Style.RESET_ALL}\n")
+            print(f"{Style.DIM}---{Style.RESET_ALL}")  # Separator line
+
+    #
+    # GEMINI CACHE METHODS
+    #
+    def _create_cached_model(
+        self,
+        model_name: str,
+        display_name: str,
+        contents: list[str],
+        **kwargs
+    ) -> tuple[genai.GenerativeModel, caching.CachedContent | None]:
+        """Create a Gemini model with cached content.
+
+        Args:
+            model_name: Name of the Gemini model to use
+            display_name: Display name for the cached content
+            contents: List of content strings to cache
+            **kwargs: Additional configuration parameters for the model
+
+        Returns:
+            Tuple of (GenerativeModel, CachedContent or None if fallback)
+        """
+        try:
+            # Create new cache
+            cached_content = caching.CachedContent.create(
+                model=model_name,
+                display_name=display_name,
+                contents=contents,
+                ttl=datetime.timedelta(minutes=self.CACHE_TTL_MINUTES)
+            )
+
+            # Create model with provided config
+            model = genai.GenerativeModel.from_cached_content(
+                cached_content=cached_content,
+                generation_config={
+                    "response_mime_type": "text/plain",
+                    **kwargs
+                }
+            )
+            self._print_debug(f"Created cached model: {display_name}")
+            return model, cached_content
+
+        except Exception as e:
+            self._print_debug(f"Error creating cached model: {str(e)}")
+            # Fallback to non-cached model
+            model = genai.GenerativeModel(
+                model_name=model_name,
+                generation_config={
+                    "response_mime_type": "text/plain",
+                    **kwargs
+                }
+            )
+            self._print_debug(f"Fell back to non-cached model: {display_name}")
+            return model, None
 
     #
     # CONTEXT METHODS
     #
     def _update_current_context(self, dates: list[str]) -> None:
         """Update the current transcript context."""
-        # TODO this should update the context in gemini
-        # TODO warning if dates > max transcript context
         self.current_dates = dates
         self.current_context = "\n\n".join(
             [
@@ -207,6 +283,44 @@ class OLABot:
                 for date in dates[: self.MAX_TRANSCRIPT_CONTEXT]
             ],
         )
+
+        try:
+            # Delete old cache if it exists
+            if hasattr(self, 'current_context_cache'):
+                self.current_context_cache.delete()
+                self._print_debug("Deleted old cache")
+
+            # Create new cache for main model with updated transcripts
+            self.current_context_cache = caching.CachedContent.create(
+                model = 'models/gemini-1.5-flash-002',
+                display_name = 'OLABot Current Transcripts',
+                contents = [self.current_context],
+                ttl = datetime.timedelta(minutes=self.CACHE_TTL_MINUTES)
+            )
+            # Update main model with new cached context
+            self.model = genai.GenerativeModel.from_cached_content(
+                cached_content = self.current_context_cache,
+                generation_config={
+                    "temperature": 1,
+                    "top_p": 0.95,
+                    "max_output_tokens": 8192,
+                    "response_mime_type": "text/plain",
+                }
+            )
+            self._print_debug("Updated main model with new cached context")
+        except Exception as e:
+            self._print_debug(f"Error updating context cache: {str(e)}")
+            # Fallback to non-cached model
+            self.model = genai.GenerativeModel(
+                model_name="gemini-1.5-flash-002",
+                generation_config={
+                    "temperature": 1,
+                    "top_p": 0.95,
+                    "max_output_tokens": 8192,
+                    "response_mime_type": "text/plain",
+                    },
+                )
+            self._print_debug("Fell back to non-cached model")
 
     def _check_context_relevance(self, question: str) -> bool:
         """Check if the current context can answer the new question."""
@@ -223,14 +337,6 @@ class OLABot:
             ],
         )
 
-        # Create a condensed representation of available transcripts
-        transcript_content = "\n\n".join(
-            [
-                f"**{date}**:\n{self.transcript_summaries[date]}"
-                for date in self.current_dates
-            ],
-        )
-
         prompt = f"""
         Given this new question about the Ontario Legislature:
         "{question}"
@@ -238,10 +344,12 @@ class OLABot:
         Recent conversation history:
         {conversation_context}
 
-        Current transcript summaries:
-        {transcript_content}
+        Current transcripts:
+        {', '.join(self.current_dates)}
 
-        Analyze if the current transcripts can answer this question or if we need new ones. Use the following guidelines:
+        Read the question, the conversation history, and the given transcripts.
+        Analyze if the current transcripts can answer this question or if we need new ones.
+        Use the following guidelines:
 
         1. USE_CURRENT_CONTEXT if:
            - Question follows naturally from conversation history
@@ -263,137 +371,68 @@ class OLABot:
         Return ONLY one of these: USE_CURRENT_CONTEXT or NEED_NEW_CONTEXT
         """
 
-        response = self.small_model.generate_content(prompt)
+        response = self.retrieval_model.generate_content(prompt)
         decision = response.text.strip()
         self._print_debug(self._format_usage_stats(response.usage_metadata))
         self._print_debug(f"Checking context relevance decision: {decision}")
         return decision == "USE_CURRENT_CONTEXT"
 
     #
-    # ROUTING METHODS
-    #
-    def _route_question(self, question: str) -> dict:
-        """Determine what type of question and which transcripts to load."""
-        prompt = f"""
-        Analyze this question about the Ontario Legislature:
-        "{question}"
-
-        Return in JSON format:
-        {{
-            "type": "TOPIC_SEARCH or PERSON_STATEMENT or BILL_DISCUSSION",
-            "topics": ["main topic", "related topics"],
-            "time_period": {{
-                "start": "YYYY-MM-DD if explicitly mentioned, otherwise null",
-                "end": "YYYY-MM-DD if explicitly mentioned, otherwise null"
-            }},
-            "people": ["only names specifically mentioned in the question"],
-            "bill_number": "only if a specific bill (like 'Bill 123') is mentioned, otherwise null"
-        }}
-
-        Important rules:
-        - Only include dates if they are explicitly mentioned in the question
-        - Only include people who are specifically named in the question
-        - Only include bill numbers that are explicitly mentioned (format: 'Bill ###')
-        - Do not infer or make up any information not directly stated in the question
-        - Leave fields as null if the information isn't explicitly provided
-
-        Do not include any markdown formatting or backticks in your response.
-        """
-
-        response = self.small_model.generate_content(prompt)
-        response_text = response.text
-
-        try:
-            # Clean the response text
-            response_text = response_text.strip()
-
-            # Remove markdown formatting if present
-            if response_text.startswith("```json"):
-                response_text = response_text.replace("```json", "", 1)
-            if response_text.endswith("```"):
-                response_text = response_text[:-3]
-            response_text = response_text.strip()
-
-            routing = json.loads(response_text)
-            routing["topics"] = routing.get("topics", [])
-            routing["people"] = routing.get("people", [])
-            routing["bill_number"] = routing.get("bill_number", [])
-
-            self._print_debug(self._format_usage_stats(response.usage_metadata))
-            self._print_debug(f"Final routing: {routing}")
-            return routing
-
-        except json.JSONDecodeError:
-            print(f"Error parsing JSON: {response_text}")
-            return {
-                "type": "TOPIC_SEARCH",
-                "topics": [question],
-                "time_period": {"start": self.earliest_date, "end": self.latest_date},
-                "people": [],
-                "bill_number": None,
-            }
-
-    #
     # FILTERING METHODS
     #
-    def _select_relevant_transcripts(self, routing_analysis: dict) -> list[str]:
-        """Select relevant transcripts based on question and available transcripts."""
-        dates = self.available_dates
 
-        # Apply date filter if specified
-        # Add date validation function
-        def is_valid_date_format(date_str):
-            return bool(re.match(r"^\d{4}-\d{2}-\d{2}$", date_str))
-
-        # Filter transcripts by date if valid date format
-        if routing_analysis.get("time_period"):
-            start_date = routing_analysis["time_period"].get("start")
-            end_date = routing_analysis["time_period"].get("end")
-
-            if start_date and is_valid_date_format(start_date):
-                dates = [d for d in dates if d >= start_date]
-            if end_date and is_valid_date_format(end_date):
-                dates = [d for d in dates if d <= end_date]
-
-        # Create a condensed representation of available transcripts
-        transcript_content = "\n\n".join(
-            [f"**{date}**:\n{self.transcript_summaries[date]}" for date in dates],
-        )
+    def _select_relevant_transcripts(self, question: str) -> list[str]:
+        """Select relevant transcripts based on question and available summaries."""
 
         prompt = f"""
-        Question type: {routing_analysis['type']}
-        Topics mentioned: {', '.join(routing_analysis.get('topics', []))}
-        People mentioned: {', '.join(routing_analysis.get('people', []))}
-        Bill number: {routing_analysis.get('bill_number')}
+        Given this question about the Ontario Legislature:
+        "{question}"
 
-        From these transcript summaries, return all relevant dates that would be useful to answer the question.
-        Consider:
-        1. Speakers mentioned in the question
-        2. Topics and their semantic similarities
-        3. Bill discussions if specified
-        4. Most recent dates if everything else is equal
+        Available transcript dates range from {self.earliest_date} to {self.latest_date}.
+
+        Using the transcript summaries provided in the context, select the most relevant dates that would help answer the question.
+        CRITICAL: You MUST start with the MOST RECENT transcripts ({self.latest_date}) unless the question
+        specifically asks about historical events or mentions older dates.
+
+        Consider in order of priority:
+        1. Most recent dates (starting from {self.latest_date})
+        2. Explicit date references in the question
+        3. Speakers mentioned
+        4. Topics and their semantic similarities
+        5. Bill discussions
 
         Return ONLY the dates, one per line, in the format YYYY-MM-DD.
-
-        Available transcripts:
-        {transcript_content}
+        Limit your response to {self.MAX_TRANSCRIPT_CONTEXT} dates maximum.
+        Start with the most recent relevant dates.
         """
 
-        response = self.small_model.generate_content(prompt)
+        # get most recent relevant
+        response = self.retrieval_model.generate_content(prompt)
         response_text = response.text
-        relevant_dates = [date for date in response_text.split("\n") if date in dates][
-            : self.MAX_TRANSCRIPT_CONTEXT
+        relevant_dates = [
+            date for date in response_text.split("\n")
+            if date.strip() in self.available_dates
         ]
+        # fallback: if none returned
+        if not relevant_dates:
+            self._print_debug("No specific dates found, using most recent transcripts")
+            relevant_dates = self.available_dates[:self.MAX_TRANSCRIPT_CONTEXT]
+
+        relevant_dates = sorted(relevant_dates, reverse=True)[:self.MAX_TRANSCRIPT_CONTEXT]
 
         self._print_debug(self._format_usage_stats(response.usage_metadata))
         self._print_debug(f"Selected dates: {relevant_dates}")
         return relevant_dates
 
+
     #
     # RESPONSE GENERATION METHODS
     #
-    def _generate_response(self, question: str) -> str:
-        """Generate response using selected transcripts."""
+    def _generate_response(self, question: str) -> Union[str, Generator]:
+        """
+        Generate response using selected transcripts.
+        Returns a string if not streaming, otherwise a generator.
+        """
         # Get recent conversation context
         recent_exchanges = self.conversation_history[
             -self.MAX_CONVERSATION_HISTORY :
@@ -403,11 +442,6 @@ class OLABot:
                 f"Previous Q: {exchange['question']}\nPrevious A: {exchange['response']}"
                 for exchange in recent_exchanges
             ],
-        )
-
-        # TODO ideally (for rubric points) this is cached. Unsure how to include this in the prompt in that case though
-        transcript_content = "\n\n".join(
-            [f"**{date}**:\n{self.transcripts[date]}" for date in self.current_dates],
         )
 
         prompt = f"""
@@ -431,42 +465,55 @@ class OLABot:
 
         Remember: Your audience is the average citizen who wants to understand what happened in their legislature.
         If the audience asks for more detail, feel free to provide a more comprehensive answer.
-
-        Transcripts:
-        {transcript_content}
         """
 
-        response = self.model.generate_content(prompt, stream=False)
-        # streaming
-        # response = self.model.generate_content(prompt, stream=True)
-        # return response
-        response_text = response.text
+        try:
+            response = self.model.generate_content(prompt, stream=self.streaming)
+            self._print_debug("Generated response")  # Add debug logging
 
-        # Store this exchange in history
-        self.conversation_history.append(
-            {"question": question, "response": response_text},
-        )
+            if not self.streaming:
+                response_text = response.text
+                self.conversation_history.append(
+                    {"question": question, "response": response_text},
+                )
+                return response_text
 
-        self._print_debug(self._format_usage_stats(response.usage_metadata))
-        return response_text
+            return response
 
-    def chat(self, question: str) -> str:
+        except Exception as e:
+            self._print_debug(f"Error generating response: {str(e)}")
+            raise
+
+    def chat(self, question: str) -> Union[str, Generator]:
         """Main chat interface."""
         try:
             # Check if current context is relevant
             if self._check_context_relevance(question):
                 self._print_debug("Using cached context")
-                return self._generate_response(question)
+                response = self._generate_response(question)
             else:
                 self._print_debug("Fetching new context")
-                routing = self._route_question(question)
-                relevant_dates = self._select_relevant_transcripts(routing)
+                relevant_dates = self._select_relevant_transcripts(question)
                 self._update_current_context(relevant_dates)
 
                 if not relevant_dates:
                     return "I couldn't find any relevant discussions in the available transcripts."
 
-                return self._generate_response(question)
+                response = self._generate_response(question)
+
+            if not self.streaming:
+                return response
+
+            # handle streaming
+            full_response = ""
+            for chunk in response:
+                full_response += chunk.text
+                yield chunk.text
+
+            self.conversation_history.append(
+                {"question": question, "response": full_response},
+            )
+            self._print_debug(self._format_usage_stats(chunk.usage_metadata))
 
         except Exception as e:  # FIXME what kind of exception?
             return f"{Fore.RED}Sorry, I encountered an error: {e!s}{Style.RESET_ALL}"
@@ -481,15 +528,19 @@ def main():
         question = input(f"{Fore.GREEN}Your question: {Style.RESET_ALL}")
         if question.lower() == "quit":
             print(f"\n{Fore.CYAN}Goodbye! 👋{Style.RESET_ALL}\n")
+
+            # quitting behaviour
+            bot.current_context_cache.delete()
+            bot.transcript_summaries_cache.delete()
+            bot._print_debug("Deleted all caches")
+
+            bot._print_debug("System quit.")
+
             break
 
         bot.print_question(question)
         response = bot.chat(question)
         bot.print_response(response)
-        # streaming
-        # for chunk in response:
-        #    bot.print_response(chunk.text)
-
 
 if __name__ == "__main__":
     main()
