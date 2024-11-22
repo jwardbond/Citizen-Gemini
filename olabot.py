@@ -36,6 +36,8 @@ class OLABot:
         # some constants
         self.MAX_TRANSCRIPT_CONTEXT = 5  # The number of transcript files
         self.CACHE_TTL_MINUTES = 10  # Cache time-to-live in minutes
+        self.RETRIEVAL_MODEL_NAME = 'models/gemini-1.5-flash-8b'
+        self.MAIN_MODEL_NAME = 'models/gemini-1.5-flash-002'
 
         # some settings
         self.debug = debug
@@ -63,7 +65,7 @@ class OLABot:
 
         # Initialize models
         self.model, self.current_context_cache = self._create_cached_model(
-            model_name='models/gemini-1.5-flash-002',
+            model_name=self.MAIN_MODEL_NAME,
             display_name='OLABot Current Transcripts',
             contents=[''],
             temperature=1,
@@ -72,7 +74,7 @@ class OLABot:
         self._initialize_chat() # assigns
 
         self.retrieval_model, self.transcript_summaries_cache = self._create_cached_model(
-            model_name='models/gemini-1.5-flash-8b',
+            model_name=self.RETRIEVAL_MODEL_NAME,
             display_name='OLABot Transcript Summaries',
             contents=[self.transcript_condensed],
             temperature=1,
@@ -325,7 +327,7 @@ class OLABot:
 
             # Create new model using helper function
             self.model, self.current_context_cache = self._create_cached_model(
-                model_name='models/gemini-1.5-flash-002',
+                model_name=self.MAIN_MODEL_NAME,
                 display_name='OLABot Current Transcripts',
                 contents=[self.current_context],
                 temperature=1,
@@ -339,7 +341,7 @@ class OLABot:
             self._print_debug(f"Error updating context cache: {str(e)}")
             # Fallback to non-cached model
             self.model = genai.GenerativeModel(
-                model_name="gemini-1.5-flash-002",
+                model_name=self.MAIN_MODEL_NAME,
                 generation_config={
                     "temperature": 1,
                     "top_p": 0.95,
