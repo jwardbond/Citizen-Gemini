@@ -3,6 +3,8 @@ import json
 import os
 import re
 from pathlib import Path
+from typing import Union, Generator, Any
+
 
 import dotenv
 import google.generativeai as genai
@@ -14,7 +16,7 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 
 class OLABot:
-    def __init__(self, hansard_path: Path, debug: bool = False):
+    def __init__(self, hansard_path: Path, debug: bool = False, streaming: bool = True):
         """Initialize the Ontario Legislature Assistant Bot."""
         if not isinstance(hansard_path, Path):
             hansard_path = Path(hansard_path)
@@ -69,6 +71,7 @@ class OLABot:
 
         # whether in debug mode
         self.debug = debug
+        self.streaming = streaming
 
     #
     # TRANSCRIPT SUMMARIES
@@ -188,10 +191,18 @@ class OLABot:
         """Print user question with styling."""
         print(f"\n{Fore.GREEN}❓ You: {Style.BRIGHT}{question}{Style.RESET_ALL}")
 
-    def print_response(self, response: str) -> None:
+    def print_response(self, response: str | Generator) -> None:
         """Print bot response with styling."""
-        print(f"\n{Fore.BLUE}🤖 Assistant: {Style.NORMAL}{response}{Style.RESET_ALL}\n")
-        print(f"{Style.DIM}---{Style.RESET_ALL}")  # Separator line
+        if self.streaming:
+            # Print assistant prefix only once
+            print(f"\n{Fore.BLUE}🤖 Assistant: {Style.NORMAL}", end="", flush=True)
+            for chunk in response:
+                print(f"{Fore.BLUE}{chunk}", end="", flush=True)
+            print(f"\n\n{Style.DIM}---{Style.RESET_ALL}")  # Separator line
+        else:
+            print(f"\n{Fore.BLUE}🤖 Assistant: {Style.NORMAL}{response}{Style.RESET_ALL}\n")
+            print(f"{Style.DIM}---{Style.RESET_ALL}")  # Separator line
+
 
     #
     # CONTEXT METHODS
@@ -392,8 +403,11 @@ class OLABot:
     #
     # RESPONSE GENERATION METHODS
     #
-    def _generate_response(self, question: str) -> str:
-        """Generate response using selected transcripts."""
+    def _generate_response(self, question: str) -> Union[str, Generator]:
+        """
+        Generate response using selected transcripts.
+        Returns a string if not streaming, otherwise a generator.
+        """
         # Get recent conversation context
         recent_exchanges = self.conversation_history[
             -self.MAX_CONVERSATION_HISTORY :
@@ -436,27 +450,24 @@ class OLABot:
         {transcript_content}
         """
 
-        response = self.model.generate_content(prompt, stream=False)
-        # streaming
-        # response = self.model.generate_content(prompt, stream=True)
-        # return response
-        response_text = response.text
+        response = self.model.generate_content(prompt, stream=self.streaming)
 
-        # Store this exchange in history
-        self.conversation_history.append(
-            {"question": question, "response": response_text},
-        )
+        if not self.streaming:
+            response_text = response.text
+            self.conversation_history.append(
+                {"question": question, "response": response_text},
+            )
+            return response_text
 
-        self._print_debug(self._format_usage_stats(response.usage_metadata))
-        return response_text
+        return response
 
-    def chat(self, question: str) -> str:
+    def chat(self, question: str) -> Union[str, Generator]:
         """Main chat interface."""
         try:
             # Check if current context is relevant
             if self._check_context_relevance(question):
                 self._print_debug("Using cached context")
-                return self._generate_response(question)
+                response = self._generate_response(question)
             else:
                 self._print_debug("Fetching new context")
                 routing = self._route_question(question)
@@ -466,7 +477,21 @@ class OLABot:
                 if not relevant_dates:
                     return "I couldn't find any relevant discussions in the available transcripts."
 
-                return self._generate_response(question)
+                response = self._generate_response(question)
+
+            if not self.streaming:
+                return response
+
+            # handle streaming
+            full_response = ""
+            for chunk in response:
+                full_response += chunk.text
+                yield chunk.text
+
+            self.conversation_history.append(
+                {"question": question, "response": full_response},
+            )
+            self._print_debug(self._format_usage_stats(chunk.usage_metadata))
 
         except Exception as e:  # FIXME what kind of exception?
             return f"{Fore.RED}Sorry, I encountered an error: {e!s}{Style.RESET_ALL}"
@@ -486,10 +511,6 @@ def main():
         bot.print_question(question)
         response = bot.chat(question)
         bot.print_response(response)
-        # streaming
-        # for chunk in response:
-        #    bot.print_response(chunk.text)
-
 
 if __name__ == "__main__":
     main()
