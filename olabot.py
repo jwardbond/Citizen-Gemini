@@ -6,12 +6,13 @@ from pathlib import Path
 from typing import Union, Generator
 import dotenv
 import google.generativeai as genai
+from google.generativeai import caching
 from colorama import Back, Fore, Style
 
 dotenv.load_dotenv()
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-
+genai.configure(api_key=GEMINI_API_KEY)
 
 class OLABot:
     def __init__(self, hansard_path: Path, debug: bool = False, streaming: bool = True):
@@ -33,10 +34,11 @@ class OLABot:
             self.transcript_bills,
             self.transcript_summaries,
         ) = self._generate_transcript_summaries()
+        self.transcript_condensed = "\n\n".join(
+            [f"**{date}**:\n{self.transcript_summaries[date]}" for date in self.available_dates]
+        )
 
-        # Initialize Gemini
-        genai.configure(api_key=GEMINI_API_KEY)
-
+        # Initialize Gemini main model
         self.model = genai.GenerativeModel(
             model_name="gemini-1.5-flash",
             generation_config={
@@ -47,6 +49,24 @@ class OLABot:
                 "response_mime_type": "text/plain",
             },
         )
+
+        # Initialize Gemini retrieval model
+        # with transcript summaries as cached context
+        self.transcript_summaries_cache = caching.CachedContent.create(
+            model = 'models/gemini-1.5-flash-8b',
+            display_name = 'OLABot Transcript Summaries',
+            contents = [self.transcript_condensed]
+        )
+        self.retrieval_model = genai.GenerativeModel.from_cached_content(
+            cached_content = self.transcript_summaries_cache,
+            generation_config={
+                "temperature": 1,
+                "max_output_tokens": 1024,
+                "response_mime_type": "text/plain",
+            }
+        )
+
+        # Initialize Gemini small model -- used for checking current context relevance
         self.small_model = genai.GenerativeModel(
             model_name="gemini-1.5-flash-8b",
             generation_config={
@@ -284,10 +304,6 @@ class OLABot:
 
     def _select_relevant_transcripts(self, question: str) -> list[str]:
         """Select relevant transcripts based on question and available summaries."""
-        # Create a condensed representation of available transcripts
-        transcript_content = "\n\n".join(
-            [f"**{date}**:\n{self.transcript_summaries[date]}" for date in self.available_dates]
-        )
 
         prompt = f"""
         Given this question about the Ontario Legislature:
@@ -303,13 +319,10 @@ class OLABot:
 
         Return ONLY the dates, one per line, in the format YYYY-MM-DD.
         Limit your response to {self.MAX_TRANSCRIPT_CONTEXT} dates maximum.
-
-        Available transcripts:
-        {transcript_content}
         """
 
         # get most recent relevant
-        response = self.small_model.generate_content(prompt)
+        response = self.retrieval_model.generate_content(prompt)
         response_text = response.text
         relevant_dates = [
             date for date in response_text.split("\n")
@@ -392,7 +405,6 @@ class OLABot:
                 response = self._generate_response(question)
             else:
                 self._print_debug("Fetching new context")
-                #routing = self._route_question(question)
                 relevant_dates = self._select_relevant_transcripts(question)
                 self._update_current_context(relevant_dates)
 
