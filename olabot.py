@@ -8,15 +8,40 @@ import dotenv
 import google.generativeai as genai
 from google.generativeai import caching
 from colorama import Back, Fore, Style
+import datetime
 
 dotenv.load_dotenv()
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 genai.configure(api_key=GEMINI_API_KEY)
 
+
+"""Some Gemini helper functions"""
+def list_models():
+    for m in genai.list_models():
+        print(f"Model name: {m.name}")
+        print(f"Display name: {m.display_name}")
+        print(f"Description: {m.description}")
+        print(f"Supported generation methods: {m.supported_generation_methods}")
+        print("---")
+
+def delete_all_caches():
+    for c in caching.CachedContent.list():
+        c.delete()
+
 class OLABot:
     def __init__(self, hansard_path: Path, debug: bool = False, streaming: bool = True):
         """Initialize the Ontario Legislature Assistant Bot."""
+        # some constants
+        self.MAX_CONVERSATION_HISTORY = 5  # Max number of previous Q/A pairs
+        self.MAX_TRANSCRIPT_CONTEXT = 5  # The number of transcript files
+        self.CACHE_TTL_MINUTES = 10  # Cache time-to-live in minutes
+
+        # some settings
+        self.debug = debug
+        self.streaming = streaming
+
+
         if not isinstance(hansard_path, Path):
             hansard_path = Path(hansard_path)
 
@@ -38,42 +63,21 @@ class OLABot:
             [f"**{date}**:\n{self.transcript_summaries[date]}" for date in self.available_dates]
         )
 
-        # Initialize Gemini main model
-        self.model = genai.GenerativeModel(
-            model_name="gemini-1.5-flash",
-            generation_config={
-                "temperature": 1,
-                "top_p": 0.95,
-                "top_k": 64,
-                "max_output_tokens": 8192,
-                "response_mime_type": "text/plain",
-            },
+        # Initialize models
+        self.model, self.current_context_cache = self._create_cached_model(
+            model_name='models/gemini-1.5-flash-002',
+            display_name='OLABot Current Transcripts',
+            contents=[''],
+            temperature=1,
+            max_output_tokens=8192
         )
 
-        # Initialize Gemini retrieval model
-        # with transcript summaries as cached context
-        self.transcript_summaries_cache = caching.CachedContent.create(
-            model = 'models/gemini-1.5-flash-8b',
-            display_name = 'OLABot Transcript Summaries',
-            contents = [self.transcript_condensed]
-        )
-        self.retrieval_model = genai.GenerativeModel.from_cached_content(
-            cached_content = self.transcript_summaries_cache,
-            generation_config={
-                "temperature": 1,
-                "max_output_tokens": 1024,
-                "response_mime_type": "text/plain",
-            }
-        )
-
-        # Initialize Gemini small model -- NOTE: not used rn
-        self.small_model = genai.GenerativeModel(
-            model_name="gemini-1.5-flash-8b",
-            generation_config={
-                "temperature": 1,
-                "max_output_tokens": 1024,
-                "response_mime_type": "text/plain",
-            },
+        self.retrieval_model, self.transcript_summaries_cache = self._create_cached_model(
+            model_name='models/gemini-1.5-flash-8b',
+            display_name='OLABot Transcript Summaries',
+            contents=[self.transcript_condensed],
+            temperature=1,
+            max_output_tokens=1024
         )
 
         # Initialize conversation history
@@ -82,14 +86,6 @@ class OLABot:
         # Initialize current transcript context
         self.current_dates = []
         self.current_context = ""
-
-        # some constants
-        self.MAX_CONVERSATION_HISTORY = 5  # Max number of previous Q/A pairs
-        self.MAX_TRANSCRIPT_CONTEXT = 5  # The number of transcript files
-
-        # whether in debug mode
-        self.debug = debug
-        self.streaming = streaming
 
     #
     # TRANSCRIPT SUMMARIES
@@ -221,14 +217,65 @@ class OLABot:
             print(f"\n{Fore.BLUE}🤖 Assistant: {Style.NORMAL}{response}{Style.RESET_ALL}\n")
             print(f"{Style.DIM}---{Style.RESET_ALL}")  # Separator line
 
+    #
+    # GEMINI CACHE METHODS
+    #
+    def _create_cached_model(
+        self,
+        model_name: str,
+        display_name: str,
+        contents: list[str],
+        **kwargs
+    ) -> tuple[genai.GenerativeModel, caching.CachedContent | None]:
+        """Create a Gemini model with cached content.
+
+        Args:
+            model_name: Name of the Gemini model to use
+            display_name: Display name for the cached content
+            contents: List of content strings to cache
+            **kwargs: Additional configuration parameters for the model
+
+        Returns:
+            Tuple of (GenerativeModel, CachedContent or None if fallback)
+        """
+        try:
+            # Create new cache
+            cached_content = caching.CachedContent.create(
+                model=model_name,
+                display_name=display_name,
+                contents=contents,
+                ttl=datetime.timedelta(minutes=self.CACHE_TTL_MINUTES)
+            )
+
+            # Create model with provided config
+            model = genai.GenerativeModel.from_cached_content(
+                cached_content=cached_content,
+                generation_config={
+                    "response_mime_type": "text/plain",
+                    **kwargs
+                }
+            )
+            self._print_debug(f"Created cached model: {display_name}")
+            return model, cached_content
+
+        except Exception as e:
+            self._print_debug(f"Error creating cached model: {str(e)}")
+            # Fallback to non-cached model
+            model = genai.GenerativeModel(
+                model_name=model_name,
+                generation_config={
+                    "response_mime_type": "text/plain",
+                    **kwargs
+                }
+            )
+            self._print_debug(f"Fell back to non-cached model: {display_name}")
+            return model, None
 
     #
     # CONTEXT METHODS
     #
     def _update_current_context(self, dates: list[str]) -> None:
         """Update the current transcript context."""
-        # TODO this should update the context in gemini
-        # TODO warning if dates > max transcript context
         self.current_dates = dates
         self.current_context = "\n\n".join(
             [
@@ -236,6 +283,44 @@ class OLABot:
                 for date in dates[: self.MAX_TRANSCRIPT_CONTEXT]
             ],
         )
+
+        try:
+            # Delete old cache if it exists
+            if hasattr(self, 'current_context_cache'):
+                self.current_context_cache.delete()
+                self._print_debug("Deleted old cache")
+
+            # Create new cache for main model with updated transcripts
+            self.current_context_cache = caching.CachedContent.create(
+                model = 'models/gemini-1.5-flash-002',
+                display_name = 'OLABot Current Transcripts',
+                contents = [self.current_context],
+                ttl = datetime.timedelta(minutes=self.CACHE_TTL_MINUTES)
+            )
+            # Update main model with new cached context
+            self.model = genai.GenerativeModel.from_cached_content(
+                cached_content = self.current_context_cache,
+                generation_config={
+                    "temperature": 1,
+                    "top_p": 0.95,
+                    "max_output_tokens": 8192,
+                    "response_mime_type": "text/plain",
+                }
+            )
+            self._print_debug("Updated main model with new cached context")
+        except Exception as e:
+            self._print_debug(f"Error updating context cache: {str(e)}")
+            # Fallback to non-cached model
+            self.model = genai.GenerativeModel(
+                model_name="gemini-1.5-flash-002",
+                generation_config={
+                    "temperature": 1,
+                    "top_p": 0.95,
+                    "max_output_tokens": 8192,
+                    "response_mime_type": "text/plain",
+                    },
+                )
+            self._print_debug("Fell back to non-cached model")
 
     def _check_context_relevance(self, question: str) -> bool:
         """Check if the current context can answer the new question."""
@@ -303,17 +388,18 @@ class OLABot:
         Given this question about the Ontario Legislature:
         "{question}"
 
-        Select the most relevant transcript dates from these summaries that would help answer the question.
-        IMPORTANT: Strongly prefer the most recent transcripts unless there is a compelling reason to use older ones.
+        Available transcript dates range from {self.earliest_date} to {self.latest_date}.
+
+        Using the transcript summaries provided in the context, select the most relevant dates that would help answer the question.
+        CRITICAL: You MUST start with the MOST RECENT transcripts ({self.latest_date}) unless the question
+        specifically asks about historical events or mentions older dates.
 
         Consider in order of priority:
-        1. Most recent dates that contain relevant information
+        1. Most recent dates (starting from {self.latest_date})
         2. Explicit date references in the question
         3. Speakers mentioned
         4. Topics and their semantic similarities
         5. Bill discussions
-
-        Only use older transcripts if they contain significantly more relevant information than recent ones.
 
         Return ONLY the dates, one per line, in the format YYYY-MM-DD.
         Limit your response to {self.MAX_TRANSCRIPT_CONTEXT} dates maximum.
@@ -327,6 +413,11 @@ class OLABot:
             date for date in response_text.split("\n")
             if date.strip() in self.available_dates
         ]
+        # fallback: if none returned
+        if not relevant_dates:
+            self._print_debug("No specific dates found, using most recent transcripts")
+            relevant_dates = self.available_dates[:self.MAX_TRANSCRIPT_CONTEXT]
+
         relevant_dates = sorted(relevant_dates, reverse=True)[:self.MAX_TRANSCRIPT_CONTEXT]
 
         self._print_debug(self._format_usage_stats(response.usage_metadata))
@@ -353,11 +444,6 @@ class OLABot:
             ],
         )
 
-        # TODO ideally (for rubric points) this is cached. Unsure how to include this in the prompt in that case though
-        transcript_content = "\n\n".join(
-            [f"**{date}**:\n{self.transcripts[date]}" for date in self.current_dates],
-        )
-
         prompt = f"""
         You are a helpful assistant making the Ontario Legislature more accessible to average citizens.
         You are given a question and a set of transcripts from the Ontario Legislature.
@@ -379,21 +465,24 @@ class OLABot:
 
         Remember: Your audience is the average citizen who wants to understand what happened in their legislature.
         If the audience asks for more detail, feel free to provide a more comprehensive answer.
-
-        Transcripts:
-        {transcript_content}
         """
 
-        response = self.model.generate_content(prompt, stream=self.streaming)
+        try:
+            response = self.model.generate_content(prompt, stream=self.streaming)
+            self._print_debug("Generated response")  # Add debug logging
 
-        if not self.streaming:
-            response_text = response.text
-            self.conversation_history.append(
-                {"question": question, "response": response_text},
-            )
-            return response_text
+            if not self.streaming:
+                response_text = response.text
+                self.conversation_history.append(
+                    {"question": question, "response": response_text},
+                )
+                return response_text
 
-        return response
+            return response
+
+        except Exception as e:
+            self._print_debug(f"Error generating response: {str(e)}")
+            raise
 
     def chat(self, question: str) -> Union[str, Generator]:
         """Main chat interface."""
@@ -439,6 +528,14 @@ def main():
         question = input(f"{Fore.GREEN}Your question: {Style.RESET_ALL}")
         if question.lower() == "quit":
             print(f"\n{Fore.CYAN}Goodbye! 👋{Style.RESET_ALL}\n")
+
+            # quitting behaviour
+            bot.current_context_cache.delete()
+            bot.transcript_summaries_cache.delete()
+            bot._print_debug("Deleted all caches")
+
+            bot._print_debug("System quit.")
+
             break
 
         bot.print_question(question)
