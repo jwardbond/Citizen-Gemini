@@ -4,9 +4,12 @@ agenda_clips/
 tmp/
 iframe_figures/
 temp/
+raw_data/
+archive/ 
 
 # Test files 
 test.json
+format.py
 
 # Outputs
 *.csv
