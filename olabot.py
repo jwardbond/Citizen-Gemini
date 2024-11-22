@@ -3,9 +3,7 @@ import json
 import os
 import re
 from pathlib import Path
-from typing import Union, Generator, Any
-
-
+from typing import Union, Generator
 import dotenv
 import google.generativeai as genai
 from colorama import Back, Fore, Style
@@ -281,124 +279,48 @@ class OLABot:
         return decision == "USE_CURRENT_CONTEXT"
 
     #
-    # ROUTING METHODS
-    #
-    def _route_question(self, question: str) -> dict:
-        """Determine what type of question and which transcripts to load."""
-        prompt = f"""
-        Analyze this question about the Ontario Legislature:
-        "{question}"
-
-        Return in JSON format:
-        {{
-            "type": "TOPIC_SEARCH or PERSON_STATEMENT or BILL_DISCUSSION",
-            "topics": ["main topic", "related topics"],
-            "time_period": {{
-                "start": "YYYY-MM-DD if explicitly mentioned, otherwise null",
-                "end": "YYYY-MM-DD if explicitly mentioned, otherwise null"
-            }},
-            "people": ["only names specifically mentioned in the question"],
-            "bill_number": "only if a specific bill (like 'Bill 123') is mentioned, otherwise null"
-        }}
-
-        Important rules:
-        - Only include dates if they are explicitly mentioned in the question
-        - Only include people who are specifically named in the question
-        - Only include bill numbers that are explicitly mentioned (format: 'Bill ###')
-        - Do not infer or make up any information not directly stated in the question
-        - Leave fields as null if the information isn't explicitly provided
-
-        Do not include any markdown formatting or backticks in your response.
-        """
-
-        response = self.small_model.generate_content(prompt)
-        response_text = response.text
-
-        try:
-            # Clean the response text
-            response_text = response_text.strip()
-
-            # Remove markdown formatting if present
-            if response_text.startswith("```json"):
-                response_text = response_text.replace("```json", "", 1)
-            if response_text.endswith("```"):
-                response_text = response_text[:-3]
-            response_text = response_text.strip()
-
-            routing = json.loads(response_text)
-            routing["topics"] = routing.get("topics", [])
-            routing["people"] = routing.get("people", [])
-            routing["bill_number"] = routing.get("bill_number", [])
-
-            self._print_debug(self._format_usage_stats(response.usage_metadata))
-            self._print_debug(f"Final routing: {routing}")
-            return routing
-
-        except json.JSONDecodeError:
-            print(f"Error parsing JSON: {response_text}")
-            return {
-                "type": "TOPIC_SEARCH",
-                "topics": [question],
-                "time_period": {"start": self.earliest_date, "end": self.latest_date},
-                "people": [],
-                "bill_number": None,
-            }
-
-    #
     # FILTERING METHODS
     #
-    def _select_relevant_transcripts(self, routing_analysis: dict) -> list[str]:
-        """Select relevant transcripts based on question and available transcripts."""
-        dates = self.available_dates
 
-        # Apply date filter if specified
-        # Add date validation function
-        def is_valid_date_format(date_str):
-            return bool(re.match(r"^\d{4}-\d{2}-\d{2}$", date_str))
-
-        # Filter transcripts by date if valid date format
-        if routing_analysis.get("time_period"):
-            start_date = routing_analysis["time_period"].get("start")
-            end_date = routing_analysis["time_period"].get("end")
-
-            if start_date and is_valid_date_format(start_date):
-                dates = [d for d in dates if d >= start_date]
-            if end_date and is_valid_date_format(end_date):
-                dates = [d for d in dates if d <= end_date]
-
+    def _select_relevant_transcripts(self, question: str) -> list[str]:
+        """Select relevant transcripts based on question and available summaries."""
         # Create a condensed representation of available transcripts
         transcript_content = "\n\n".join(
-            [f"**{date}**:\n{self.transcript_summaries[date]}" for date in dates],
+            [f"**{date}**:\n{self.transcript_summaries[date]}" for date in self.available_dates]
         )
 
         prompt = f"""
-        Question type: {routing_analysis['type']}
-        Topics mentioned: {', '.join(routing_analysis.get('topics', []))}
-        People mentioned: {', '.join(routing_analysis.get('people', []))}
-        Bill number: {routing_analysis.get('bill_number')}
+        Given this question about the Ontario Legislature:
+        "{question}"
 
-        From these transcript summaries, return all relevant dates that would be useful to answer the question.
+        Select the most relevant transcript dates from these summaries that would help answer the question.
         Consider:
-        1. Speakers mentioned in the question
+        1. Speakers mentioned
         2. Topics and their semantic similarities
-        3. Bill discussions if specified
+        3. Bill discussions
         4. Most recent dates if everything else is equal
+        5. Date ranges if mentioned in the question
 
         Return ONLY the dates, one per line, in the format YYYY-MM-DD.
+        Limit your response to {self.MAX_TRANSCRIPT_CONTEXT} dates maximum.
 
         Available transcripts:
         {transcript_content}
         """
 
+        # get most recent relevant
         response = self.small_model.generate_content(prompt)
         response_text = response.text
-        relevant_dates = [date for date in response_text.split("\n") if date in dates][
-            : self.MAX_TRANSCRIPT_CONTEXT
+        relevant_dates = [
+            date for date in response_text.split("\n")
+            if date.strip() in self.available_dates
         ]
+        relevant_dates = sorted(relevant_dates, reverse=True)[:self.MAX_TRANSCRIPT_CONTEXT]
 
         self._print_debug(self._format_usage_stats(response.usage_metadata))
         self._print_debug(f"Selected dates: {relevant_dates}")
         return relevant_dates
+
 
     #
     # RESPONSE GENERATION METHODS
@@ -470,8 +392,8 @@ class OLABot:
                 response = self._generate_response(question)
             else:
                 self._print_debug("Fetching new context")
-                routing = self._route_question(question)
-                relevant_dates = self._select_relevant_transcripts(routing)
+                #routing = self._route_question(question)
+                relevant_dates = self._select_relevant_transcripts(question)
                 self._update_current_context(relevant_dates)
 
                 if not relevant_dates:
