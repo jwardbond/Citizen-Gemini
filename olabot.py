@@ -1,6 +1,7 @@
 import inspect
 import json
 import os
+import sys
 import re
 from pathlib import Path
 from typing import Union, Generator
@@ -24,6 +25,10 @@ def list_models():
         print(f"Description: {m.description}")
         print(f"Supported generation methods: {m.supported_generation_methods}")
         print("---")
+
+def list_all_caches():
+    for c in caching.CachedContent.list():
+        print(c)
 
 def delete_all_caches():
     for c in caching.CachedContent.list():
@@ -363,35 +368,31 @@ class OLABot:
         ) if self.chat.history else ""
 
         prompt = f"""
-        Given this new question about the Ontario Legislature:
+        New question:
         "{question}"
 
-        Recent conversation history:
+        Previous conversation:
         {conversation_context}
 
-        Current transcripts:
+        Currently loaded transcripts are from:
         {', '.join(self.current_dates)}
 
-        Read the question, the conversation history, and the given transcripts.
-        Analyze if the current transcripts can answer this question or if we need new ones.
-        Use the following guidelines:
+        Your task: Determine if we should use current transcripts or need new ones.
+        BE CONSERVATIVE - prefer using current context unless absolutely necessary.
 
-        1. USE_CURRENT_CONTEXT if:
-           - Question follows naturally from conversation history
-           - Asks for more details about current topics/speakers
-           - References "that", "this", "they" referring to current context
-           - Current transcripts contain relevant dates/people/topics
-           - Different aspect of same events/discussions
+        Return USE_CURRENT_CONTEXT if ANY of these are true:
+        - Question is a follow-up or clarification of previous discussion
+        - Question uses words like "that", "this", "those", "they" referring to current context
+        - Question asks for more details about topics/people already discussed
+        - Question can be partially answered with current transcripts
+        - Question is about interpretation or analysis of current content
 
-        2. NEED_NEW_CONTEXT if:
-           - Mentions new person not in current context
-           - Asks about specific person across all meetings
-           - Completely new topic unrelated to current transcripts
-           - Explicit requests like "search all transcripts" or "forget that"
-           - Different time period or different speakers
-           - Current transcripts unlikely to contain complete answer
-           - Contains phrases like "tell me more about", "all available meetings", "search for"
-
+        ONLY return NEED_NEW_CONTEXT if ALL of these are true:
+        - Question explicitly asks about different dates/meetings
+        - Question mentions specific people/topics definitely not in current transcripts
+        - Question contains explicit search requests like "find all instances" or "search all transcripts"
+        - Current context is completely irrelevant to the new question
+        - You are 100% certain new transcripts are required
 
         Return ONLY one of these: USE_CURRENT_CONTEXT or NEED_NEW_CONTEXT
         """
@@ -510,23 +511,26 @@ def main():
     bot = OLABot("../citizengemini/hansard.json", debug=True)
     bot.print_welcome()
 
-    while True:
-        question = input(f"{Fore.GREEN}Your question: {Style.RESET_ALL}")
-        if question.lower() == "quit":
-            print(f"\n{Fore.CYAN}Goodbye! 👋{Style.RESET_ALL}\n")
+    try:
+        while True:
+            question = input(f"{Fore.GREEN}Your question: {Style.RESET_ALL}")
+            if question.lower() == "quit":
+                break
 
-            # quitting behaviour
+            bot.print_question(question)
+            response = bot.chat_interface(question)
+            bot.print_response(response)
+    except KeyboardInterrupt:
+        bot._print_debug(f"Interrupted by user.")
+    finally:
+        try:
             bot.current_context_cache.delete()
             bot.transcript_summaries_cache.delete()
             bot._print_debug("Deleted all caches")
+        except Exception as e:
+            bot._print_debug(f"Error cleaning up caches: {e}")
 
-            bot._print_debug("System quit.")
-
-            break
-
-        bot.print_question(question)
-        response = bot.chat_interface(question)
-        bot.print_response(response)
+        print(f"\n{Fore.CYAN}Goodbye! 👋{Style.RESET_ALL}\n")
 
 if __name__ == "__main__":
     main()
