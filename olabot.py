@@ -29,11 +29,11 @@ def delete_all_caches():
     for c in caching.CachedContent.list():
         c.delete()
 
+
 class OLABot:
     def __init__(self, hansard_path: Path, debug: bool = False, streaming: bool = True):
         """Initialize the Ontario Legislature Assistant Bot."""
         # some constants
-        self.MAX_CONVERSATION_HISTORY = 5  # Max number of previous Q/A pairs
         self.MAX_TRANSCRIPT_CONTEXT = 5  # The number of transcript files
         self.CACHE_TTL_MINUTES = 10  # Cache time-to-live in minutes
 
@@ -41,11 +41,9 @@ class OLABot:
         self.debug = debug
         self.streaming = streaming
 
-
+        # Load transcripts
         if not isinstance(hansard_path, Path):
             hansard_path = Path(hansard_path)
-
-        # Load transcripts
         with hansard_path.open(encoding="utf-8") as f:
             self.transcripts = json.load(f)
         # Get the date range of available transcripts
@@ -71,6 +69,7 @@ class OLABot:
             temperature=1,
             max_output_tokens=8192
         )
+        self._initialize_chat() # assigns
 
         self.retrieval_model, self.transcript_summaries_cache = self._create_cached_model(
             model_name='models/gemini-1.5-flash-8b',
@@ -79,9 +78,6 @@ class OLABot:
             temperature=1,
             max_output_tokens=1024
         )
-
-        # Initialize conversation history
-        self.conversation_history = []
 
         # Initialize current transcript context
         self.current_dates = []
@@ -218,7 +214,7 @@ class OLABot:
             print(f"{Style.DIM}---{Style.RESET_ALL}")  # Separator line
 
     #
-    # GEMINI CACHE METHODS
+    # GEMINI METHODS
     #
     def _create_cached_model(
         self,
@@ -271,6 +267,40 @@ class OLABot:
             self._print_debug(f"Fell back to non-cached model: {display_name}")
             return model, None
 
+    def _initialize_chat(self, previous_history: list[dict] = None) -> None:
+        """Initialize chat with system prompt and optional previous history."""
+
+        system_prompt = """You are a helpful assistant making the Ontario Legislature more accessible to average citizens.
+        You are given a question and a set of transcripts from the Ontario Legislature.
+        Be specific and concise in your responses. Do not talk about irrelevant things in the transcripts.
+        Make sure to use all the information available to you to answer the question.
+
+        Guidelines for your response:
+        1. Be concise and clear - avoid political jargon
+        2. If this is a follow-up question, reference relevant information from previous responses
+        3. If quoting from transcripts, only use the most relevant quotes
+        4. Structure your response in short paragraphs
+        5. Include the date when mentioning specific discussions
+        6. If something is unclear or missing from the transcripts, say so
+
+        Remember: Your audience is the average citizen who wants to understand what happened in their legislature.
+        If the audience asks for more detail, feel free to provide a more comprehensive answer."""
+
+        initial_history = [
+            {"role": "user", "parts": system_prompt},
+            {"role": "model", "parts": "I understand my role and guidelines."}
+        ]
+
+        if previous_history:
+            initial_history.extend(previous_history)
+
+        self.chat = self.model.start_chat(history=initial_history)
+
+        if not previous_history:
+            self._print_debug("Initialized chat with system prompt")
+        else:
+            self._print_debug("Carried over previous history")
+
     #
     # CONTEXT METHODS
     #
@@ -285,6 +315,9 @@ class OLABot:
         )
 
         try:
+            # Save previous history
+            previous_history = self.chat.history[2:] if hasattr(self, 'chat') else None
+
             # Delete old cache if it exists
             if hasattr(self, 'current_context_cache'):
                 self.current_context_cache.delete()
@@ -307,6 +340,7 @@ class OLABot:
                     "response_mime_type": "text/plain",
                 }
             )
+            self._initialize_chat(previous_history)
             self._print_debug("Updated main model with new cached context")
         except Exception as e:
             self._print_debug(f"Error updating context cache: {str(e)}")
@@ -328,14 +362,10 @@ class OLABot:
         if self.current_context == "":
             return False
 
-        # Get recent conversation context
-        recent_exchanges = self.conversation_history[-self.MAX_CONVERSATION_HISTORY :]
+        # Get conversation history from chat
         conversation_context = "\n".join(
-            [
-                f"Previous Q: {exchange['question']}\nPrevious A: {exchange['response']}"
-                for exchange in recent_exchanges
-            ],
-        )
+            [f"Previous {msg.role}: {msg.parts[0].text}" for msg in self.chat.history[2:]]  # Skip system prompt
+        ) if self.chat.history else ""
 
         prompt = f"""
         Given this new question about the Ontario Legislature:
@@ -433,49 +463,13 @@ class OLABot:
         Generate response using selected transcripts.
         Returns a string if not streaming, otherwise a generator.
         """
-        # Get recent conversation context
-        recent_exchanges = self.conversation_history[
-            -self.MAX_CONVERSATION_HISTORY :
-        ]  # Last exchanges
-        conversation_context = "\n".join(
-            [
-                f"Previous Q: {exchange['question']}\nPrevious A: {exchange['response']}"
-                for exchange in recent_exchanges
-            ],
-        )
-
-        prompt = f"""
-        You are a helpful assistant making the Ontario Legislature more accessible to average citizens.
-        You are given a question and a set of transcripts from the Ontario Legislature.
-        Be specific and concise in your responses. Do not talk about irrelevant things in the transcripts.
-        Make sure to use all the information available to you to answer the question.
-
-        Current Question: "{question}"
-
-        {f'''Recent conversation history:
-        {conversation_context}''' if recent_exchanges else ''}
-
-        Guidelines for your response:
-        1. Be concise and clear - avoid political jargon
-        2. If this is a follow-up question, reference relevant information from previous responses
-        3. If quoting from transcripts, only use the most relevant quotes
-        4. Structure your response in short paragraphs
-        5. Include the date when mentioning specific discussions
-        6. If something is unclear or missing from the transcripts, say so
-
-        Remember: Your audience is the average citizen who wants to understand what happened in their legislature.
-        If the audience asks for more detail, feel free to provide a more comprehensive answer.
-        """
 
         try:
-            response = self.model.generate_content(prompt, stream=self.streaming)
+            response = self.chat.send_message(question, stream=self.streaming)
             self._print_debug("Generated response")  # Add debug logging
 
             if not self.streaming:
                 response_text = response.text
-                self.conversation_history.append(
-                    {"question": question, "response": response_text},
-                )
                 return response_text
 
             return response
@@ -484,7 +478,7 @@ class OLABot:
             self._print_debug(f"Error generating response: {str(e)}")
             raise
 
-    def chat(self, question: str) -> Union[str, Generator]:
+    def chat_interface(self, question: str) -> Union[str, Generator]:
         """Main chat interface."""
         try:
             # Check if current context is relevant
@@ -510,9 +504,6 @@ class OLABot:
                 full_response += chunk.text
                 yield chunk.text
 
-            self.conversation_history.append(
-                {"question": question, "response": full_response},
-            )
             self._print_debug(self._format_usage_stats(chunk.usage_metadata))
 
         except Exception as e:  # FIXME what kind of exception?
@@ -521,7 +512,7 @@ class OLABot:
 
 def main():
     # Initialize bot
-    bot = OLABot("hansard.json", debug=True)
+    bot = OLABot("../citizengemini/hansard.json", debug=True)
     bot.print_welcome()
 
     while True:
@@ -539,7 +530,7 @@ def main():
             break
 
         bot.print_question(question)
-        response = bot.chat(question)
+        response = bot.chat_interface(question)
         bot.print_response(response)
 
 if __name__ == "__main__":
