@@ -37,6 +37,7 @@ exclude = [
 ignore = [ 
     "FBT00",    # Boolean arguments
     "D10",      # Docstring
+    "D202",     # Blank lines after docstrings
     "PT009",    # Assertion errors 
     "TD",       # Errors with todos
     "FIX001",   # Fixing HACKS
