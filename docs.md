@@ -1,93 +1,96 @@
 # OLABot Technical Documentation
 
-## TODO
-- Add caching!
-
 ## Overview
-OLABot is a Python-based chatbot designed to interact with Ontario Legislature (Hansard) transcripts. It uses Google's Gemini AI to provide context-aware responses about legislative proceedings.
+OLABot is a Python-based chatbot designed to interact with Ontario Legislature (Hansard) transcripts. It uses Google's Gemini AI to provide factual responses about legislative proceedings. To scale Gemini's context window from 1 million to 20 million tokens, we developed a method which we call *dynamic caching*.
 
 ## Overall Design
 
-The core technical challenge is that the transcripts are quite long, in fact totalling **20 million tokens**. This makes it infeasible to load the entire corpus into memory, even with Gemini's 1 million context window. We also want to optimize for resource usage. This led us to develop a system that dynamically loads and unloads transcripts based on the user's question. First, Gemini parses every query into a set of entities: people, bills, dates, and topics. Then, Gemini determines if the current loaded transcripts are relevant to the query by comparing these entities to transcript summaries we generated, or if the current question is a follow up to the previous question. If not, we find a new set of transcripts that are relevant and load them in. Once a set of relevant transcripts are loaded, we finally use Gemini to answer the question.
+The core technical challenge is that the transcripts are quite long, in fact totalling _20 million tokens_. This makes it infeasible to load the entire corpus into memory, even with Gemini's 1 million tokens context window. We also want to optimize for resource usage.
 
-We use Gemini Flash 8B for the smaller tasks like parsing queries and determining if the current transcripts are relevant. For the larger tasks like answering questions, we use Gemini Flash.
+This led us to develop *dynamic caching*. Dynamic caching is a technique that allows the bot to dynamically load and unload transcripts based on the user's question. Sometimes, users may ask a series of questions about the same topic, such that it can be answered with the currently loaded transcripts. However, users may also want to ask a question which would require different transcripts. In dynamic caching, every question is first queried to see if the currently loaded transcripts can answer the question. If yes, then the question is answered. If not, then new transcripts are retrieved and loaded in.
 
-Below we outline how the two main components work. We call them Intelligent Question Routing and Dynamic Cache Management.
+The dynamic caching system has three components:
+1. Determine if the current transcripts can answer the question (`_check_context_relevance`)
+2. Retrieve and load in new transcripts if necessary (`_select_relevant_transcripts`)
+3. Answer the question (`_generate_response`)
 
-## Core Strategies
+To save time and costs, tasks (1) and (2) use Gemini Flash 8B, which we refer to as `retrieval_model`. Also, they use summaries of the transcripts, instead of the full transcripts themselves.
 
-### Intelligent Question Routing
-OLABot employs a sophisticated approach to question analysis using LLMs. The core technical challenge is that the transcripts are quite long, in fact totalling 20 million tokens. This makes it infeasible to load the entire corpus into memory, even with Gemini's 1 million context window. We also want to optimize for resource usage. This led us to develop a system that dynamically loads and unloads transcripts based on the user's question.
+For task (3), we use Gemini Flash, which we refer to as `model`.
 
-First, Gemini parses every query into a set of entities:
-- People (e.g., "MPP Smith", "Minister of Health")
-- Bills (e.g., "Bill 124")
-- Dates (e.g., "2024-01-01" -- in YYYY-MM-DD format)
-- Topics (e.g., "healthcare", "education funding")
+The retrieval model simply requires a cache of the transcript summaries, and this does not change. We use Gemini's caching system for this.
 
-Then, Gemini determines if the current loaded transcripts are relevant to the query by comparing these entities to transcript summaries we generated, or if the current question is a follow up to the previous question. If not, we find a new set of transcripts that are relevant and load them in.
+The main model, however, requires a cache of the transcripts themselves. This is more expensive, and we want to limit the number of transcripts loaded in to save costs. This is where dynamic caching comes in.
 
+## Program Flow
 
-### Dynamic Cache Management
-OLABot implements an innovative approach to managing conversation context:
+### Initialization
+- Two Gemini models are initialized:
+  - `retrieval_model`: Cached with transcript summaries
+  - `model`: Started with empty cache
 
-1. **Context Relevance Analysis**
-   - Uses LLM to determine if current loaded transcripts can answer new questions
-   - Analyzes conversation flow and topic transitions
-   - Makes intelligent decisions about when to fetch new context
+### Question Processing
+1. When a question is asked, `_check_context_relevance` uses the retrieval model to determine if current context can answer it
 
-2. **Adaptive Context Loading**
-   - Maintains optimal context window size
-   - Intelligently selects which transcripts to keep or discard
-   - Balances completeness of response with performance
+2. If new context needed:
+   - Select relevant transcripts using the retrieval model (`_select_relevant_transcripts`)
+   - Create new cache and model instance, with carried over history (`_update_current_context`)
 
-3. **Conversation Continuity**
-   - Maintains coherent discussion across topic changes
-   - Handles follow-up questions naturally
-   - Preserves relevant context while discarding irrelevant information
+3. If current context sufficient:
+   - Use existing model and cache
 
-This dual-strategy approach allows OLABot to provide more accurate and relevant responses, and scalably handle the massive transcript corpus.
+4. Generate response using loaded context (`_generate_response`)
 
-## Conversation Flow
-
-1. User submits question
-2. Bot checks if current context is sufficient (`check_context_relevance`)
-3. If new context needed:
-   - Routes question (`route_question`)
-   - Selects relevant transcripts (`select_relevant_transcripts`)
-   - Updates current context (`update_current_context`)
-4. Generates response using selected context (`generate_response`)
-5. Updates conversation history
-
-## Core Components
+```mermaid
+flowchart LR
+    A[Initialize Models] --> B[Question Asked]
+    B --> C{Check Context Relevance}
+    C -->|Need New Context| D[Select Relevant Transcripts]
+    D --> E[New cache & model <br> Carry over history]
+    E --> F[Generate Response]
+    C -->|Current Context Sufficient| F
+```
 
 ## Initialization
 
-The bot reads a JSON file containing Hansard transcripts. It then processes them for easier searching and retrieval. It also maintains a conversation history and current transcript context, as well as two Gemini models: `model` and `small_model`, which are Gemini Flash and Gemini Flash 8B respectively, used for different tasks.
+The bot reads a JSON file containing Hansard transcripts. It then processes them for easier searching and retrieval (see `_generate_transcript_summaries`). It also initializes two models: `model` and `retrieval_model`, which are Gemini Flash and Gemini Flash 8B respectively, used for different tasks (note this is easily changeable by modifying some constants).
 
 ## Class Attributes
+
+### Constants
+- `MAX_TRANSCRIPT_CONTEXT`: Maximum number of transcripts to load at once
+- `CACHE_TTL_MINUTES`: Cache time-to-live in minutes
+- `RETRIEVAL_MODEL_NAME`: Gemini model name used for tasks (1) and (2)
+- `MAIN_MODEL_NAME`: Gemini model name used for task (3)
+
+### Configuration Attributes
+- `debug`: Boolean flag for enabling debug output
+- `streaming`: Boolean flag for enabling response streaming
+
+### Instance Attributes
 - `transcripts`: A dictionary mapping dates to transcripts
 - `transcript_topics`: A dictionary mapping dates to lists of discussion topics
 - `transcript_speakers`: A dictionary mapping dates to lists of speakers present
 - `transcript_bills`: A dictionary mapping dates to lists of bills discussed
 - `transcript_summaries`: A dictionary mapping dates to formatted summary strings
+- `transcript_condensed`: A condensed string of all available transcripts
 - `available_dates`: A list of all dates in the corpus in YYYY-MM-DD format, sorted in descending order
 - `earliest_date`: The earliest date in the corpus
 - `latest_date`: The latest date in the corpus
-- `conversation_history`: Conversation history. A list of dicts, each containing a `question` and `response`
 - `current_dates`: Currently loaded transcript dates. A list of strings in YYYY-MM-DD format
-- `current_content`: Content of currently loaded transcripts. A dictionary mapping dates to transcripts
-- `MAX_CONVERSATION_HISTORY`: Maximum number of past exchanges to maintain
-- `MAX_TRANSCRIPT_CONTEXT`: Maximum number of transcripts to load at once
+- `current_context`: Currently loaded transcript content as a string
 - `model`: Gemini Flash model
-- `small_model`: Gemini Flash 8B model
+- `retrieval_model`: Gemini Flash 8B model
+- `current_context_cache`: Gemini cache for the main model's context
+- `transcript_summaries_cache`: Gemini cache for the retrieval model's summaries
+- `chat`: Gemini chat object for the main model
 
 ## Key Methods
 
 ### Transcript Processing
 
 ```python
-def generate_transcript_summaries(self) -> tuple[dict, dict, dict, dict]:
+def _generate_transcript_summaries(self) -> tuple[dict, dict, dict, dict]:
 ```
 
 This function processes the transcripts into four dictionaries:
@@ -127,7 +130,7 @@ The extraction process uses heuristics with string matching, regex, and simple p
 ### Context Management
 
 ```python
-def check_context_relevance(self, question: str) -> str:
+def _check_context_relevance(self, question: str) -> str:
 ```
 
 Determines if current loaded transcripts can answer a new question by:
@@ -135,35 +138,23 @@ Determines if current loaded transcripts can answer a new question by:
 2. Checking current transcript summaries
 3. Using Gemini to decide if new context is needed
 
+If current context is blank (e.g., first question), it will just return `NEED_NEW_CONTEXT`.
+
 Returns: `USE_CURRENT_CONTEXT` or `NEED_NEW_CONTEXT`
 
 ```python
-def update_current_context(self, dates: list[str]):
+def _update_current_context(self, dates: list[str]):
 ```
 
-Updates the current transcript context to the given dates and the corresponding transcripts.
-
-### Question Routing
-
-```python
-def route_question(self, question: str) -> dict:
-```
-
-Analyzes questions to determine search strategy:
-- Returns dictionary with:
-  - `type`: TOPIC_SEARCH, PERSON_STATEMENT, or BILL_DISCUSSION
-  - `topics`: List of relevant topics
-  - `time_period`: Date range if specified
-  - `people`: Named individuals
-  - `bill_number`: Specific bill references
+Updates the current transcript context to the given dates and the corresponding transcripts. It creates a new Gemini model and cache, and carries over the conversation history. Related methods: `_create_cached_model` and `_initialize_chat`.
 
 ### Transcript Selection
 
 ```python
-def select_relevant_transcripts(self, question: str) -> list[str]:
+def _select_relevant_transcripts(self, question: str) -> list[str]:
 ```
 
-Selects most relevant transcript dates based on:
+Uses Gemini to select the most relevant transcript dates based on:
 1. Date filters if specified
 2. Speaker mentions
 3. Topic relevance
@@ -174,16 +165,11 @@ Returns: List of dates of transcripts to load in YYYY-MM-DD format
 ### Response Generation
 
 ```python
-def generate_response(self, question: str) -> str:
+def _generate_response(self, question: str) -> str:
 ```
-The main method that generates responses. Uses the current question, recent conversation history, selected transcript content.
+The main method that generates responses. Uses the current question, recent conversation history, selected transcript content. This uses Gemini's chat API, i.e., `send_message`.
 
 ## Other Technical Details
-
-### Error Handling
-- JSON parsing errors in routing default to basic topic search
-- Missing transcripts return appropriate message
-- General exceptions caught in main chat loop
 
 ### Dependencies
 - `google.generativeai`: Gemini AI interface
@@ -205,9 +191,3 @@ When enabled (`debug=True`):
 - Prints routing decisions
 - Shows context selection process
 - Displays token usage statistics
-
-### Performance Considerations
-- Maintains limited conversation history to manage context size
-- Uses Gemini Flash model for routing decisions
-- Limits number of loaded transcripts
-- Caches current context when appropriate
