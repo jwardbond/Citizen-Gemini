@@ -39,6 +39,21 @@ def delete_all_caches():
         print("deleted")
 
 
+def documents_to_string(documents: dict) -> str:
+    outstring = ""
+    for doc_id, doc in documents.items():
+        outstring += (
+            f"*********************DOCUMENT {doc_id} START*********************\n"
+        )
+        outstring += f"ID: {doc_id}\n"
+        for k, v in doc.items():
+            outstring += f"{k.upper()}: {v}\n"
+        outstring += (
+            f"*********************DOCUMENT {doc_id} END*********************\n\n\n\n"
+        )
+    return outstring
+
+
 class OLABot:
     def __init__(
         self,
@@ -59,38 +74,34 @@ class OLABot:
         self.debug = debug
         self.streaming = streaming
 
-        # Load documents
-        if not isinstance(documents_path, Path):
-            documents_path = Path(documents_path)
+        # Load data
+        documents_path = Path(documents_path)
         with documents_path.open(encoding="utf-8") as f:
             self.documents = json.load(f)
-
-        # Load summaries
-        if not isinstance(summaries_path, Path):
-            summaries_path = Path(summaries_path)
+        summaries_path = Path(summaries_path)
         with summaries_path.open(encoding="utf-8") as f:
-            summaries = json.load(f)
-        self.summaries = "\n\n\n".join(list(summaries.values()))
+            self.summaries = json.load(f)
 
         # Get the date range of available transcripts
-        available_dates = [k.replace("tr-", "") for k in self.documents if "tr" in k]
+        available_dates = [
+            v["id_number"] for v in self.documents.values() if v["type"] == "transcript"
+        ]
         self.available_dates = sorted(available_dates)
 
         # Get the bills numbers for the available documents
         available_bills = [
-            k.replace("bill-", "") for k in self.documents if "bill" in k
+            v["id_number"] for v in self.documents.values() if v["type"] == "bills"
         ]
         self.available_bills = sorted(available_bills)
 
         # Create context for the main chatbot
         # initilized to the three most recent transcripts
         # **ID**\n Type: [type] \n\n [text]
-        self.current_document_ids = [f"tr-{d}" for d in self.available_dates[-3:]]
-        self.current_context = "\n\n\n".join(
-            [
-                f"**{doc}**\nType: {self.documents[doc]["type"]}\n\n{self.documents[doc]["text"]}"
-                for doc in self.current_document_ids
-            ],
+        self.current_document_ids = [
+            f"transcript {d}" for d in self.available_dates[-3:]
+        ]
+        self.current_context = documents_to_string(
+            {k: self.documents[k] for k in self.current_document_ids}
         )
 
         # Initialize main chatbot
@@ -109,8 +120,8 @@ class OLABot:
         self.retrieval_model, self.summaries_cache = self._create_cached_model(
             model_name=self.RETRIEVAL_MODEL_NAME,
             display_name="OLABot Transcript Summaries",
-            contents=[self.summaries],
-            temperature=0.7,  # TODO check temp
+            contents=[documents_to_string(self.summaries)],
+            temperature=1,  # TODO check temp
             max_output_tokens=1024,
         )
 
@@ -225,17 +236,17 @@ class OLABot:
         """
 
         system_prompt = """You are a helpful assistant making the Ontario Legislative Assembly more accessible to average citizens.
-        You are given a question and a set of both TRANSCRIPTS and/or BILLS from the current Ontario Legislative Assembly.
-        Be specific and concise in your responses. Do not talk about irrelevant things in the transcripts or bills.
+        You are given a question and a set DOCUMENTS which contains both TRANSCRIPTS and/or BILLS from the current Ontario Legislative Assembly.
+        Be specific and concise in your responses. Do not talk about irrelevant things in the documents.
         Make sure to use all the information available to you to answer the question.
 
         Guidelines for your response:
         1. Be concise and clear - avoid political jargon
         2. If this is a follow-up question, reference relevant information from previous responses
-        3. If quoting from transcripts or bills, only use the most relevant quotes
+        3. If quoting from documents, only use the most relevant quotes
         4. Structure your response in short paragraphs
         5. Include the date when mentioning specific discussions
-        6. If something is unclear or missing from the transcripts or bills, say so
+        6. If something is unclear or missing from the documents, say so
 
         Remember: Your audience is the average citizen who wants to understand what is going on in their government legislature.
         If the audience asks for more detail, feel free to provide a more comprehensive answer."""
@@ -261,11 +272,8 @@ class OLABot:
     def _update_current_context(self, document_ids: list[str]) -> None:
         """Update the current chat context."""
         self.current_document_ids = document_ids[: self.MAX_DOCUMENT_CONTEXT]
-        self.current_context = "\n\n\n".join(
-            [
-                f"**{doc}**\nType: {self.documents[doc]["type"]}\n\n{self.documents[doc]["text"]}"
-                for doc in self.current_document_id
-            ],
+        self.current_context = documents_to_string(
+            {k: self.documents[k] for k in self.current_document_ids}
         )
 
         # Save previous history
@@ -316,34 +324,32 @@ class OLABot:
         Previous conversation:
         {conversation_history}
 
-        Currently loaded document ids are:
-        {', '.join(self.current_document_ids)}
-
-        Your task: Determine if you should use the current documents in your context or if you need to load new ones.
-        BE CONSERVATIVE - prefer using current context unless absolutely necessary.
-
-        For this task, "context" refers to your currently loaded documents.
+        Your task: Determine if the question is answerable by a different model, which only has access to the following documents: {', '.join(self.current_document_ids)} 
+        and the previous conversation history provided above. You can tell this second model to USE_CURRENT_CONTEXT if it should be able to answer the question 
+        with those documents or you can tell it to LOAD_NEW_CONTEXT.
 
         Return USE_CURRENT_CONTEXT if ANY of these are true:
-        - Question is a follow-up or clarification of previous discussion
-        - Question uses words like "that", "this", "those", "they" referring to the current context
+        - Question can likely be completely answered with its current documents
+        - Question is a follow-up or clarification of it's previous discussion
+        - Question uses words like "that", "this", "those", "they" referring to the documents already in its context
         - Question asks for more details about topics/people already discussed
-        - Question can be partially answered with current transcripts or bills
-        - Question is about interpretation or analysis of current context
-        - Question is about a bill and referrs to the current context
+        - Question is about interpretation or analysis of documents already in its context
+        - Question is about a bill and refers to documents already in its context
 
-        ONLY return NEED_NEW_CONTEXT if ANY of these are true:
-        - Question explicitly asks for information on dates/meetings OR bills that aren't in your current context
-        - Question mentions specific people/topics definitely not in your current context
+        Return LOAD_NEW_CONTEXT if ANY of these are true:
+        - Question explicitly asks for information on dates/meetings OR bills that aren't in its current context
+        - Question mentions specific people/topics definitely not in its current context
         - Question contains explicit search requests like "find all instances" or "search all transcripts"
         - Current context is completely irrelevant to the new question
-        - You are 100% certain new transcripts are required
+        - You are 100% certain it will require new transcripts
+        - You are 100% certain it will require new bills
 
-        Return ONLY one of these: USE_CURRENT_CONTEXT or NEED_NEW_CONTEXT
+        Return either: LOAD_NEW_CONTEXT or USE_CURRENT_CONTEXT
         """  # TODO change current context to currently loaded documents
 
         response = self.retrieval_model.generate_content(prompt)
         decision = response.text.strip()
+        self._print_debug(self.current_document_ids)
         self._print_debug(self._format_usage_stats(response.usage_metadata))
         self._print_debug(f"Checking context relevance decision: {decision}")
         return decision == "USE_CURRENT_CONTEXT"
@@ -355,12 +361,13 @@ class OLABot:
         """Select relevant transcripts based on question and available summaries."""
 
         prompt = f"""
-        Given the following question about the Ontario Legislature, and using the transcript AND bill summaries provided in your context,
+        Given the following question about the Ontario Legislature, and using the document summaries provided in your context,
         select the most relevant documents to help you answer the question.
 
         QUESTION: "{question}"
 
-        The documents in your context cover transcript dates ranging from {self.available_dates[0]} to {self.available_dates[-1]} and bill numbers ranging from numbers {self.available_bills[0]} to {self.available_bills[-1]}
+        The documents in your context are TRANSCRIPTS and BILLS from the current Ontario Legislative Assembly.
+        The transcript dates range from {self.available_dates[0]} to {self.available_dates[-1]} and the bill numbers ranging from numbers {self.available_bills[0]} to {self.available_bills[-1]}
 
         CRITICAL PRIORITY: Always prefer answering general questions with more recent transcripts. For example: "What has Doug Ford said about healthcare?" should be answered preferring more recent information.
 
@@ -376,8 +383,8 @@ class OLABot:
         4. Topics and their semantic similarities
         5. Bill discussions
 
-        Transcripts have ids like **tr-YYYY-MM-DD**
-        Bills have ids like **bill-123**
+        Transcripts have ids like "transcript YYYY-MM-DD"
+        Bills have ids like "bill 123"
 
         Return ONLY the document ids, one on each line, without asterisks.
         Limit your response to {self.MAX_DOCUMENT_CONTEXT} documents maximum.
