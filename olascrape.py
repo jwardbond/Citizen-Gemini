@@ -1,3 +1,4 @@
+import copy
 import json
 import re
 from urllib.parse import urljoin
@@ -17,12 +18,12 @@ DATE_PATTERN = r"(\d{4}-\d{2}-\d{2})"
 # BILL SCRAPING
 #
 def get_bill_names() -> list[tuple]:
-    """Returns bill ids and titles for all bills in current legislature."""
+    """Returns bill id numbers and titles for all bills in current legislature."""
     response = requests.get(BILL_BASE_URL)
     soup = BeautifulSoup(response.text, "html.parser")
 
     elements = soup.find_all("td", class_="views-field views-field-field-bill-number")
-    bills = [f"bill-{x.get_text(strip=True)}" for x in elements]  # pr bills are useless
+    bills = [f"{x.get_text(strip=True)}" for x in elements]  # pr bills are useless
 
     elements = soup.find_all("td", class_="views-field views-field-field-short-title")
     titles = [f"{x.get_text(strip=True)}" for x in elements]
@@ -33,17 +34,16 @@ def get_bill_names() -> list[tuple]:
     return output
 
 
-def fetch_bill_contents(bill: tuple[str]) -> str:
+def fetch_bill_contents(bill: str) -> str:
     """Gets and formats bill contents.
 
     Args:
-        bill (tuple): a tuple containing (id, title)
+        bill (str): the id number of the bill (as a string).
     """
 
     bill_id = bill[0]
-    bill_title = bill[1]
 
-    url = BILL_BASE_URL + bill_id
+    url = BILL_BASE_URL + "bill-" + bill_id
 
     response = requests.get(url)
     soup = BeautifulSoup(response.text, "html.parser")
@@ -74,7 +74,7 @@ def fetch_bill_contents(bill: tuple[str]) -> str:
         text = text.replace("\xa0", " ")
         text = re.sub(r"\\x[0-9A-Fa-f]{2}", "", text)
 
-        return f"Title: {bill_title}\nSponsor: {sponsor}\n{status}{text}"
+        return (sponsor, status, text)
     except AttributeError as e:
         print(url, "\n", e)
         return "None"
@@ -132,9 +132,8 @@ def fetch_hansard_content(date: str) -> str:
 #
 # DOCUMENT SUMMARIZING
 #
-def generate_transcript_summary(id: str, text: str) -> str:
+def generate_transcript_summary(date: str, text: str) -> str:
     """Process and store topics and speakers for each transcript."""
-    date = id.replace("tr-", "")
 
     # Find Topics, skipping header lines and empty lines
     toc_lines = text.split("\n\n")[0:50]
@@ -195,46 +194,43 @@ def generate_transcript_summary(id: str, text: str) -> str:
 
     bills = list(bills)
 
-    transcript_summary = f"{id} -- Transcript from: {date} | Speakers: {', '.join(speakers)} | Topics: {', '.join(topics)} | Bills: {', '.join(bills) if bills else 'None'}"
+    transcript_summary = f"Transcript from: {date} | Speakers: {', '.join(speakers)} | Topics: {', '.join(topics)} | Bills: {', '.join(bills) if bills else 'None'}"
 
     return transcript_summary
 
 
-def generate_bill_summary(id: str, text: str) -> str:
-    bill_num = id.replace("bill-", "")
+def generate_bill_summary(bill_num: str, contents: str) -> str:
+    pattern = rf"^Explanatory Note(.*?)(?=Bill {bill_num}\s+\d{{4}}\s*An Act)"
+    match = re.search(pattern, contents, re.DOTALL | re.IGNORECASE)
 
-    pattern = rf"^(.*?)(?=Bill {bill_num}\s+\d{{4}}\s*An Act)"
-    match = re.search(pattern, text, re.DOTALL)
+    result = match.group(1) if match else contents[0:1000]
 
-    result = match.group(1) if match else text
-
-    result = (
-        result.replace("\n", " ")
-        .replace(".", ". ")
-        .replace("Sponsor:", " | Sponsor:")
-        .replace("Current status:", " | Current status:")
-        .replace("  ", " ")
-    )
+    result = result.replace("\n", " ").replace(".", ". ").replace("  ", " ")
     result = re.sub(
         "EXPLANATORY NOTE",
-        " | Explanatory Note: ",
+        "",
         result,
         flags=re.IGNORECASE,
         count=1,
     )
 
     result = result.strip()
-
-    return f"{id} -- Bill {bill_num} | {result}"
+    return result
 
 
 def summarize(docs: dict) -> None:
-    summaries = {}
-    for k, v in docs.items():
-        if "tr" in k:
-            summaries[k] = generate_transcript_summary(k, v["text"])
+    summaries = copy.deepcopy(docs)
+    for k, v in summaries.items():
+        if "transcript" in k:
+            v["summary"] = generate_transcript_summary(
+                v["id_number"],
+                v.pop("contents"),
+            )
         elif "bill" in k:
-            summaries[k] = generate_bill_summary(k, v["text"])
+            v["summary"] = generate_bill_summary(
+                v["id_number"],
+                v.pop("contents"),
+            )
 
     return summaries
 
@@ -253,14 +249,30 @@ def scrape() -> None:
         }
         ```
 
-    In this case, `document_id` is "bill-[bill number]" for bills, and "tr-yyyy-mm-dd" for transcripts
+    In this case, `document_id` is "Bill [bill number]" for bills, and "yyyy-mm-dd Transcript" for transcripts
     """
     bills = get_bill_names()
-    bill_data = {b[0]: {"type": "bill", "text": fetch_bill_contents(b)} for b in bills}
+    bill_data = {}
+    for b in bills:
+        sponsor, status, contents = fetch_bill_contents(b)
+        v = {
+            "type": "bill",
+            "id_number": b[0],
+            "title": b[1],
+            "sponsor": sponsor,
+            "status": status,
+            "contents": contents,
+        }
+
+        bill_data[f"bill {b[0]}"] = v
 
     dates = get_hansard_dates()
     hans_data = {
-        f"tr-{d}": {"type": "transcript", "text": fetch_hansard_content(d)}
+        f"transcript {d}": {
+            "type": "transcript",
+            "id_number": d,
+            "contents": fetch_hansard_content(d),
+        }
         for d in dates
     }
 
