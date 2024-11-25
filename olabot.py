@@ -91,7 +91,7 @@ class OLABot:
 
         # Constants
         self.MAX_DOCUMENT_CONTEXT = 5  # The number of transcript files #FIXME this should really be max cached size or something
-        self.CACHE_TTL_MINUTES = 10  # Cache time-to-live in minutes
+        self.CACHE_TTL_MINUTES = 60  # Cache time-to-live in minutes
         self.RETRIEVAL_MODEL_NAME = "models/gemini-1.5-flash-8b"
         self.MAIN_MODEL_NAME = "models/gemini-1.5-flash-002"
 
@@ -259,21 +259,42 @@ class OLABot:
         Resets self.chat_session.
         """
 
-        system_prompt = """You are a helpful assistant making the Ontario Legislative Assembly more accessible to average citizens.
-        You are given a question and a set DOCUMENTS which contains both TRANSCRIPTS and/or BILLS from the current Ontario Legislative Assembly.
-        Be specific and concise in your responses. Do not talk about irrelevant things in the documents.
-        Make sure to use all the information available to you to answer the question.
+        system_prompt =\
+        """
+        You are a helpful assistant making the Ontario Legislative Assembly more accessible to average citizens.
 
-        Guidelines for your response:
-        1. Be concise and clear - avoid political jargon
-        2. If this is a follow-up question, reference relevant information from previous responses
-        3. If quoting from documents, only use the most relevant quotes
-        4. Structure your response in short paragraphs
-        5. Include the date when mentioning specific discussions
-        6. If something is unclear or missing from the documents, say so
+        IMPORTANT: You have persistent access to cached Ontario Legislative Assembly documents, including transcripts and bills.
+        These documents remain available to you throughout the conversation and you should use them fully.
 
-        Remember: Your audience is the average citizen who wants to understand what is going on in their government legislature.
-        If the audience asks for more detail, feel free to provide a more comprehensive answer."""
+        HOW TO ANSWER QUESTIONS:
+
+        1. CONTENT AND STYLE
+        - Use plain, accessible language - avoid political jargon
+        - Break down complex legislative concepts
+        - Structure responses in short, clear paragraphs
+        - Include specific dates when referencing discussions
+        - Be factual and neutral in tone
+
+        2. USING CACHED DOCUMENTS
+        - Reference and quote directly from cached documents
+        - Cite specific dates and sessions when quoting
+        - Provide context for any technical terms or procedures
+        - Connect legislative discussions to real-world impacts
+
+        3. LEVEL OF DETAIL
+        - Start with a concise summary
+        - Add relevant details based on the question's scope
+        - If asked for more detail, provide comprehensive information
+        - Include specific examples from the documents when helpful
+
+        4. CLARITY AND COMPLETENESS
+        - If something is unclear in the documents, say so
+        - If multiple documents are relevant, synthesize the information
+        - Explain legislative procedures in citizen-friendly terms
+
+        Remember: Your audience is the average citizen who wants to understand their government's activities. Make complex
+        legislative information accessible while making full use of your cached documents.
+        """
 
         initial_history = [
             {"role": "user", "parts": system_prompt},
@@ -360,29 +381,33 @@ class OLABot:
         - Most recent exchange used these loaded documents
 
         EVALUATION STEPS:
-        1. Review the most recent conversation exchange:
+        1. READ the main assistant's last answer carefully - what information was already provided?
+        2. Review the conversation flow:
         a) What did the user previously ask?
-        b) What information did the main assistant provide in response?
-        2. Analyze the new question:
-        a) Is it following up on the previous question-answer exchange?
-        b) Does it reference content from the assistant's last answer?
-        c) Is it changing to a new topic?
-        3. Check if current documents were just used to answer related questions
+        b) What specific information did the main assistant provide?
+        c) Does the answer contain ANY information about the new question's topic?
+        3. For the new question, check:
+        a) Does it ask for more details about something already mentioned?
+        b) Does it use words like "this" referring to previous content?
+        c) Is it asking to expand on a point already touched upon?
+        4. Important: If the previous answer contained ANY relevant information about the topic,
+        USE_CURRENT_CONTEXT to expand on that information before loading new context.
 
         DECISION RULES:
 
         USE_CURRENT_CONTEXT when ANY of these are true:
-        1. The new question follows naturally from the previous question-answer exchange
-        2. The question asks for more details about what the main assistant just explained
-        3. The question references content from the previous exchange
-        4. The question expresses interest/concern about specific details from the last answer
-        5. Question explicitly asks about what's in current context
+        1. The main assistant's last answer contains ANY information about the topic being asked about
+        2. The question asks for more details/examples/explanation of something mentioned in the last answer
+        3. The question uses words like "this", "these", "those" referring to content from the last answer
+        4. The question is about reactions/responses/criticism/support related to what was just discussed
+        5. The question explicitly asks about current context
 
         LOAD_NEW_CONTEXT only when ALL of these are true:
-        1. The question departs from the previous conversation thread
-        2. The current documents weren't used to discuss this topic
-        3. The question introduces a completely new subject
-        4. The question isn't referring to the previous exchange
+        1. The main assistant's last answer contains NO information about the topic being asked about
+        2. The question asks about documents that aren't currently loaded
+        3. The question requires searching across a broader set of documents
+        4. The question introduces a completely new topic unrelated to the last answer
+        5. The question can't possibly be answered using information from current documents
 
         EXAMPLES:
 
@@ -506,7 +531,8 @@ class OLABot:
     def _select_relevant_documents(self, question: str) -> list[str]:
         """Select relevant transcripts based on question and available summaries."""
 
-        prompt = f"""
+        prompt =\
+        f"""
         Given the following question about the Ontario Legislature, and using the document summaries provided in your context,
         select the most relevant documents to help you answer the question.
 
