@@ -38,6 +38,7 @@ def delete_all_caches():
         c.delete()
         print("deleted")
 
+"""Some string formatting and cleaning functions"""
 
 def documents_to_string(documents: dict) -> str:
     outstring = ""
@@ -52,6 +53,28 @@ def documents_to_string(documents: dict) -> str:
             f"*********************DOCUMENT {doc_id} END*********************\n\n\n\n"
         )
     return outstring
+
+def parse_llm_json(response: str) -> str:
+    """
+    Sometimes, despite how much prompt torturing you do, the LLM returns, e.g.,
+    ```json
+    {'key': val, 'key2': val2}
+    ```
+
+    where the backticks and 'json' are literally in the string.
+    This utility function will try to parse an LLM response as a json string.
+    And it will also handle that annoying case where the markdown is included.
+    """
+    cleaned = response.strip()
+    if cleaned.startswith("```"):
+        if cleaned.startswith("```json"):
+            cleaned = cleaned[7:]  # Remove ```json
+        else:
+            cleaned = cleaned[3:]  # Remove ```
+        if cleaned.endswith("```"):
+            cleaned = cleaned[:-3]  # Remove closing ```
+        cleaned = cleaned.strip()
+    return json.loads(cleaned)  # Parse to dict
 
 
 class OLABot:
@@ -90,7 +113,7 @@ class OLABot:
 
         # Get the bills numbers for the available documents
         available_bills = [
-            v["id_number"] for v in self.documents.values() if v["type"] == "bills"
+            v["id_number"] for v in self.documents.values() if v["type"] == "bill"
         ]
         self.available_bills = sorted(available_bills)
 
@@ -106,7 +129,7 @@ class OLABot:
 
         # Initialize main chatbot
         self._print_debug(
-            f"Initializing model with {", ".join(self.current_document_ids)}",
+            f"Initializing model with {', '.join(self.current_document_ids)}",
         )
         self.model, self.current_context_cache = self._create_cached_model(
             model_name=self.MAIN_MODEL_NAME,
@@ -129,7 +152,7 @@ class OLABot:
         # this is initialized to none here as a placeholder, and gets
         # set/reset whenever using the main model whenever
         # _initialize_chat_session is called
-        self.chat = None  # TODO take out?
+        self.chat_session = None  # TODO take out?
         self._initialize_chat_session()
 
     #
@@ -231,8 +254,7 @@ class OLABot:
     ):
         """Initialize chat with system prompt and optional previous history.
 
-        Returns:
-            Gemini chat session object
+        Resets self.chat_session.
         """
 
         system_prompt = """You are a helpful assistant making the Ontario Legislative Assembly more accessible to average citizens.
@@ -302,7 +324,7 @@ class OLABot:
         """Check if the current context can answer the new question."""
 
         # No context to answer the question
-        if self.current_context == "":
+        if self.current_document_ids == []:
             return False
 
         # Get conversation history from chat
@@ -317,41 +339,163 @@ class OLABot:
             else ""
         )
 
-        prompt = f"""
-        New question:
-        "{question}"
+        prompt =\
+        f"""
+        QUESTION: "{question}"
 
-        Previous conversation:
-        {conversation_history}
+        CONTEXT INFORMATION:
+        1. You have access to summaries of ALL documents in the format:
+        ***DOCUMENT {{type}} {{id}} START***
+        SUMMARY: [content summary]
+        ***DOCUMENT {{type}} {{id}} END***
 
-        Your task: Determine if the question is answerable by a different model, which only has access to the following documents: {', '.join(self.current_document_ids)} 
-        and the previous conversation history provided above. You can tell this second model to USE_CURRENT_CONTEXT if it should be able to answer the question 
-        with those documents or you can tell it to LOAD_NEW_CONTEXT.
+        2. Currently loaded COMPLETE documents: {', '.join(self.current_document_ids)}
+        (These are the only documents available for detailed analysis)
 
-        Return USE_CURRENT_CONTEXT if ANY of these are true:
-        - Question can likely be completely answered with its current documents
-        - Question is a follow-up or clarification of it's previous discussion
-        - Question uses words like "that", "this", "those", "they" referring to the documents already in its context
-        - Question asks for more details about topics/people already discussed
-        - Question is about interpretation or analysis of documents already in its context
-        - Question is about a bill and refers to documents already in its context
+        3. CONVERSATION FLOW in history:
+        - Previous questions from the user
+        - The main assistant's answers to those questions
+        - Most recent exchange used these loaded documents
 
-        Return LOAD_NEW_CONTEXT if ANY of these are true:
-        - Question explicitly asks for information on dates/meetings OR bills that aren't in its current context
-        - Question mentions specific people/topics definitely not in its current context
-        - Question contains explicit search requests like "find all instances" or "search all transcripts"
-        - Current context is completely irrelevant to the new question
-        - You are 100% certain it will require new transcripts
-        - You are 100% certain it will require new bills
+        EVALUATION STEPS:
+        1. Review the most recent conversation exchange:
+        a) What did the user previously ask?
+        b) What information did the main assistant provide in response?
+        2. Analyze the new question:
+        a) Is it following up on the previous question-answer exchange?
+        b) Does it reference content from the assistant's last answer?
+        c) Is it changing to a new topic?
+        3. Check if current documents were just used to answer related questions
 
-        Return either: LOAD_NEW_CONTEXT or USE_CURRENT_CONTEXT
-        """  # TODO change current context to currently loaded documents
+        DECISION RULES:
+
+        USE_CURRENT_CONTEXT when ANY of these are true:
+        1. The new question follows naturally from the previous question-answer exchange
+        2. The question asks for more details about what the main assistant just explained
+        3. The question references content from the previous exchange
+        4. The question expresses interest/concern about specific details from the last answer
+        5. Question explicitly asks about what's in current context
+
+        LOAD_NEW_CONTEXT only when ALL of these are true:
+        1. The question departs from the previous conversation thread
+        2. The current documents weren't used to discuss this topic
+        3. The question introduces a completely new subject
+        4. The question isn't referring to the previous exchange
+
+        EXAMPLES:
+
+        Example 1:
+        Previous Question: "What is Bill 118 about?"
+        Previous Answer: "Bill 118 establishes June 1st as Injured Workers Day..."
+        New Question: "Can you explain more about the workplace provisions in this bill?"
+        Current Documents: ["bill 118", "transcript 2023-10-23"]
+        Decision: USE_CURRENT_CONTEXT
+        Reasoning: Follows directly from previous Q&A about Bill 118's contents
+
+        Example 2:
+        Previous Question: "What does Bill 212 say about transportation?"
+        Previous Answer: "Bill 212 includes provisions about bicycle lanes that allow the province to override municipal decisions..."
+        New Question: "I'm concerned about the bicycle lane changes, can you provide more details?"
+        Current Documents: ["bill 212", "transcript 2024-11-21"]
+        Decision: USE_CURRENT_CONTEXT
+        Reasoning: Directly references information provided in last answer about bicycle lanes
+
+        Example 3:
+        Previous Question: "What did MPPs say about healthcare funding?"
+        Previous Answer: "During the May debates, MPPs discussed hospital funding..."
+        New Question: "What does Bill 124 say about nurses?"
+        Current Documents: ["transcript 2024-05-30"]
+        Decision: LOAD_NEW_CONTEXT
+        Reasoning: Switches from transcript discussions to requesting specific bill content not currently loaded
+
+        Example 4:
+        Previous Question: "What did the Premier say about healthcare?"
+        Previous Answer: "In the Question Period, Premier Ford highlighted investments including 12,500 licensed physicians and 100% match in residency positions..."
+        New Question: "Can you tell me more about the residency position expansion?"
+        Current Documents: ["transcript 2024-05-08", "transcript 2024-03-20"]
+        Decision: USE_CURRENT_CONTEXT
+        Reasoning: Asks for elaboration on specific detail mentioned in previous answer
+
+        Example 5:
+        Previous Question: "What were the key points in Bill 75?"
+        Previous Answer: "Bill 75 focuses on housing development regulations..."
+        New Question: "Are there any other bills about housing from this session?"
+        Current Documents: ["bill 75", "transcript 2024-03-15"]
+        Decision: LOAD_NEW_CONTEXT
+        Reasoning: Requires broader search across multiple bills beyond current context
+
+        Example 6:
+        Previous Question: "What bills are currently loaded?"
+        Previous Answer: "The currently loaded documents include Bill 124 and several transcripts..."
+        New Question: "What other bills mention healthcare?"
+        Current Documents: ["bill 124", "transcript 2024-05-30"]
+        Decision: LOAD_NEW_CONTEXT
+        Reasoning: Despite being related to current topic, explicitly requests other bills
+
+        Example 7:
+        Previous Question: "Tell me about the housing crisis discussion"
+        Previous Answer: "In these October sessions, MPPs debated housing affordability..."
+        New Question: "What else was said in these sessions?"
+        Current Documents: ["transcript 2023-10-23", "transcript 2023-10-24"]
+        Decision: USE_CURRENT_CONTEXT
+        Reasoning: Explicitly refers to "these sessions" in currently loaded transcripts
+
+        Example 8:
+        Previous Question: "What happened in the November 15th session?"
+        Previous Answer: "The November 15th session covered several topics including education funding..."
+        New Question: "Were there any bills introduced that day?"
+        Current Documents: ["transcript 2023-11-15"]
+        Decision: USE_CURRENT_CONTEXT
+        Reasoning: Asks about same session already loaded, just different aspect
+
+        Example 9:
+        Previous Question: "What did Minister Jones say about healthcare?"
+        Previous Answer: "Minister Jones discussed hospital funding and staffing initiatives..."
+        New Question: "Did any opposition members respond to these points?"
+        Current Documents: ["transcript 2024-05-30", "transcript 2024-05-31"]
+        Decision: USE_CURRENT_CONTEXT
+        Reasoning: Asks about responses to specific points in current transcripts
+
+        Example 10:
+        Previous Question: "What does the current context contain?"
+        Previous Answer: "Currently loaded documents include Bill 118 and transcript from October 23..."
+        New Question: "Great, can you search other transcripts for mentions of Bill 118?"
+        Current Documents: ["bill 118", "transcript 2023-10-23"]
+        Decision: LOAD_NEW_CONTEXT
+        Reasoning: Explicitly requests search beyond current documents
+
+        Example 11:
+        Previous Question: "What's in Bill 124?"
+        Previous Answer: "Bill 124 deals with healthcare worker compensation..."
+        New Question: "Show me what's currently loaded"
+        Current Documents: ["bill 124", "transcript 2024-05-30"]
+        Decision: USE_CURRENT_CONTEXT
+        Reasoning: Explicitly asks about current context contents
+
+        Example 12:
+        Previous Question: "Did they discuss climate change in October?"
+        Previous Answer: "Yes, in the October 23rd session, MPPs debated environmental policies..."
+        New Question: "What was said about this in other months?"
+        Current Documents: ["transcript 2023-10-23"]
+        Decision: LOAD_NEW_CONTEXT
+        Reasoning: "Other months" explicitly requests searching beyond current transcripts
+
+        RESPONSE FORMAT:
+        {
+            "decision": "USE_CURRENT_CONTEXT" or "LOAD_NEW_CONTEXT",
+            "reasoning": "<brief explanation focusing on relationship to previous Q&A exchange>"
+        }
+        Do NOT include any markdown formatting or backticks in the final answer. Just return a JSON that can be parsed.
+        """
 
         response = self.retrieval_model.generate_content(prompt)
-        decision = response.text.strip()
+        response_dct = parse_llm_json(response.text)
+        decision = response_dct['decision']
+        reasoning = response_dct['reasoning']
         self._print_debug(self.current_document_ids)
         self._print_debug(self._format_usage_stats(response.usage_metadata))
         self._print_debug(f"Checking context relevance decision: {decision}")
+        self._print_debug(f"Checking context relevance reasoning: {reasoning}")
         return decision == "USE_CURRENT_CONTEXT"
 
     #
@@ -439,7 +583,6 @@ class OLABot:
 
     def chat_interface(self, question: str) -> str | Generator:
         """Main chat interface."""
-
         try:
             # Check if current context is relevant
             if self._check_context_relevance(question):
@@ -468,10 +611,11 @@ class OLABot:
             self._print_debug(self._format_usage_stats(chunk.usage_metadata))
 
         except Exception as e:
-            return f"{Fore.RED}Sorry, I encountered an error: {e!s}{Style.RESET_ALL}"
+            return f"{Fore.RED}Sorry, I encountered an error: {e!s}{Style.RESET_ALL}" #TODO: fix error handling here, need to yield
 
 
 def main():
+    # Clear all caches in the cloud
     delete_all_caches()
 
     # Initialize bot
