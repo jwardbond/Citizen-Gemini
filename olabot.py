@@ -5,6 +5,8 @@ import os
 from collections.abc import Generator
 from pathlib import Path
 from zoneinfo import ZoneInfo
+import traceback
+import sys
 
 import dotenv
 import google.generativeai as genai
@@ -481,10 +483,10 @@ class OLABot:
         Reasoning: "Other months" explicitly requests searching beyond current transcripts
 
         RESPONSE FORMAT:
-        {
+        {{
             "decision": "USE_CURRENT_CONTEXT" or "LOAD_NEW_CONTEXT",
             "reasoning": "<brief explanation focusing on relationship to previous Q&A exchange>"
-        }
+        }}
         Do NOT include any markdown formatting or backticks in the final answer. Just return a JSON that can be parsed.
         """
 
@@ -610,8 +612,18 @@ class OLABot:
 
             self._print_debug(self._format_usage_stats(chunk.usage_metadata))
 
+        # catchall error handling for the whole chatbot
+        # so try to print as much detail as possible
         except Exception as e:
-            return f"{Fore.RED}Sorry, I encountered an error: {e!s}{Style.RESET_ALL}" #TODO: fix error handling here, need to yield
+            exc_type, exc_value, exc_traceback = sys.exc_info()
+            self._print_debug(''.join(traceback.format_exception_only(exc_type, exc_value)).strip())
+            self._print_debug(''.join(traceback.format_tb(exc_traceback)))
+
+            error_msg = f"{Fore.RED}Sorry, I encountered an error: {e!s}{Style.RESET_ALL}"
+            if self.streaming:
+                yield error_msg
+            else:
+                return error_msg
 
 
 def main():
