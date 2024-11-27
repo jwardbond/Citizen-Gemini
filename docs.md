@@ -11,7 +11,7 @@ This led us to develop *dynamic caching*. Dynamic caching is a technique that al
 
 The dynamic caching system has three components:
 1. Determine if the current transcripts can answer the question (`_check_context_relevance`)
-2. Retrieve and load in new transcripts if necessary (`_select_relevant_transcripts`)
+2. Retrieve and load in new transcripts if necessary (`_select_relevant_documents`)
 3. Answer the question (`_generate_response`)
 
 To save time and costs, tasks (1) and (2) use Gemini Flash 8B, which we refer to as `retrieval_model`. Also, they use summaries of the transcripts, instead of the full transcripts themselves.
@@ -33,7 +33,7 @@ The main model, however, requires a cache of the transcripts themselves. This is
 1. When a question is asked, `_check_context_relevance` uses the retrieval model to determine if current context can answer it
 
 2. If new context needed:
-   - Select relevant transcripts using the retrieval model (`_select_relevant_transcripts`)
+   - Select relevant transcripts using the retrieval model (`_select_relevant_documents`)
    - Create new cache and model instance, with carried over history (`_update_current_context`)
 
 3. If current context sufficient:
@@ -45,7 +45,7 @@ The main model, however, requires a cache of the transcripts themselves. This is
 flowchart LR
     A[Initialize Models] --> B[Question Asked]
     B --> C{_check_context_relevance}
-    C -->|LOAD_NEW_CONTEXT| D[_select_relevant_transcripts]
+    C -->|LOAD_NEW_CONTEXT| D[_select_relevant_documents]
     D --> E[_update_current_context]
     E --> F[_generate_resposne]
     C -->|USE_CURRENT_CONTEXT| F
@@ -151,7 +151,7 @@ Updates the current transcript context to the given dates and the corresponding 
 ### Transcript Selection
 
 ```python
-def _select_relevant_transcripts(self, question: str) -> list[str]:
+def _select_relevant_documents(self, question: str) -> list[str]:
 ```
 
 Uses Gemini to select the most relevant transcript dates based on:
