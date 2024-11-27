@@ -2,16 +2,15 @@ import datetime
 import inspect
 import json
 import os
+import sys
+import traceback
 from collections.abc import Generator
 from pathlib import Path
 from zoneinfo import ZoneInfo
-import traceback
-import sys
 
 import dotenv
 import google.generativeai as genai
 from colorama import Back, Fore, Style
-from google.generativeai import caching
 
 dotenv.load_dotenv()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
@@ -22,6 +21,7 @@ TZ = ZoneInfo("America/Toronto")
 
 
 def list_models():
+    """List all active models"""
     for m in genai.list_models():
         print(f"Model name: {m.name}")
         print(f"Display name: {m.display_name}")
@@ -31,18 +31,23 @@ def list_models():
 
 
 def list_all_caches():
-    for c in caching.CachedContent.list():
+    """List all active caches"""
+    for c in genai.caching.CachedContent.list():
         print(c)
 
 
 def delete_all_caches():
-    for c in caching.CachedContent.list():
+    """Delete all active caches"""
+    for c in genai.caching.CachedContent.list():
         c.delete()
         print("deleted")
 
+
 """Some string formatting and cleaning functions"""
 
+
 def documents_to_string(documents: dict) -> str:
+    """Takes a dictionary and combines every item into one giant string."""
     outstring = ""
     for doc_id, doc in documents.items():
         outstring += (
@@ -56,12 +61,15 @@ def documents_to_string(documents: dict) -> str:
         )
     return outstring
 
+
 def parse_llm_json(response: str) -> str:
-    """
-    Sometimes, despite how much prompt torturing you do, the LLM returns, e.g.,
+    """Parses the JSON content from a poorly formatter LLM response.
+
+    Sometimes, despite how much prompt torturing you do, the LLM returns, e.g.
+
     ```json
     {'key': val, 'key2': val2}
-    ```
+    ```.
 
     where the backticks and 'json' are literally in the string.
     This utility function will try to parse an LLM response as a json string.
@@ -80,6 +88,44 @@ def parse_llm_json(response: str) -> str:
 
 
 class OLABot:
+    """Ontario Legislature Assistant Bot.
+
+    This class creates two gemini models and exposes a chat interface that can be used for querying
+    Ontario Legislature documents, mainly the Hansard (transcripts) and bills.
+
+    These documents can be long (sometimes 10^5 tokens or more per document). The larger of the two models
+    is responsible for the actual chat functionality, but is only able to store a few documents in its
+    context. The smaller of the two models is responsible for preprocessing the question, which it does by
+    running it against a context cache containing *summaries* of all the documents - acting as a sort of "in
+    context vector database". If the small model decides that the context of the large model is insufficient,
+    it clears the context cache and specifies what new, more relevant documents should be loaded by the large
+    model.
+
+    Attributes:
+        MAX_DOCUMENT_CONTEXT (int): The number of transcript files the model can store.
+        CACHE_TTL_MINUTES (int): Cache time-to-live in minutes.
+        RETRIEVAL_MODEL_NAME (str): The retrieval model (current set to "models/gemini-1.5-flash-8b").
+        MAIN_MODEL_NAME (str): The main model (currently set to models/gemini-1.5-flash-002).
+        debug (bool): Flag to enable or disable debug mode.
+        streaming (bool): Flag to enable or disable streaming mode.
+        documents (dict): Loaded documents data.
+        summaries (dict): Loaded summaries data.
+        available_dates (list): Sorted list of available transcript dates.
+        available_bills (list): Sorted list of available bill numbers.
+        current_document_ids (list): List of current document IDs.
+        current_context (str): Current context string for the main chatbot.
+        model (object): Main chatbot model.
+        current_context_cache (object): Cache for the current context.
+        retrieval_model (object): Context checking model.
+        summaries_cache (object): Cache for the summaries.
+
+    Args:
+        documents_path (Path): Path to the documents file.
+        summaries_path (Path): Path to the summaries file.
+        debug (bool, optional): Flag to enable or disable debug mode. Defaults to False.
+        streaming (bool, optional): Flag to enable or disable streaming mode. Defaults to True.
+    """
+
     def __init__(
         self,
         documents_path: Path,
@@ -100,10 +146,13 @@ class OLABot:
         self.streaming = streaming
 
         # Load data
-        documents_path = Path(documents_path)
+        if isinstance(documents_path, str):
+            documents_path = Path(documents_path)
         with documents_path.open(encoding="utf-8") as f:
             self.documents = json.load(f)
-        summaries_path = Path(summaries_path)
+
+        if isinstance(summaries_path, str):
+            summaries_path = Path(summaries_path)
         with summaries_path.open(encoding="utf-8") as f:
             self.summaries = json.load(f)
 
@@ -121,12 +170,11 @@ class OLABot:
 
         # Create context for the main chatbot
         # initilized to the three most recent transcripts
-        # **ID**\n Type: [type] \n\n [text]
         self.current_document_ids = [
             f"transcript {d}" for d in self.available_dates[-3:]
         ]
         self.current_context = documents_to_string(
-            {k: self.documents[k] for k in self.current_document_ids}
+            {k: self.documents[k] for k in self.current_document_ids},
         )
 
         # Initialize main chatbot
@@ -135,18 +183,18 @@ class OLABot:
         )
         self.model, self.current_context_cache = self._create_cached_model(
             model_name=self.MAIN_MODEL_NAME,
-            display_name="OLABot Current Transcripts",
+            display_name="OLABot",
             contents=[self.current_context],
             temperature=1,
             max_output_tokens=8192,
         )
 
-        # Initialize context checking model #TODO what should we call this model
+        # Initialize context checking model
         self.retrieval_model, self.summaries_cache = self._create_cached_model(
             model_name=self.RETRIEVAL_MODEL_NAME,
-            display_name="OLABot Transcript Summaries",
+            display_name="OLABot Retrieval Helper",
             contents=[documents_to_string(self.summaries)],
-            temperature=1,  # TODO check temp
+            temperature=1,
             max_output_tokens=1024,
         )
 
@@ -154,14 +202,14 @@ class OLABot:
         # this is initialized to none here as a placeholder, and gets
         # set/reset whenever using the main model whenever
         # _initialize_chat_session is called
-        self.chat_session = None  # TODO take out?
+        self.chat_session = None
         self._initialize_chat_session()
 
     #
     # PRINTING METHODS
     #
     def _print_debug(self, message: str) -> None:
-        """Print debug messages in dim yellow."""
+        """Print debug messages in dim yellow w. timestamp."""
         time = datetime.datetime.now(tz=TZ).time()
         if self.debug:
             print(
@@ -169,11 +217,7 @@ class OLABot:
             )
 
     def _format_usage_stats(self, usage_stats: dict) -> None:
-        """Prints formatted usage statistics for a Gemini API call using _print_debug.
-
-        Args:
-            usage_stats: The usage_metadata from a Gemini response
-        """
+        """Prints formatted usage statistics for a Gemini API call using _print_debug."""
         operation_name = (
             f"{Fore.RED}{Style.DIM}{inspect.stack()[1][3]}{Fore.YELLOW}{Style.DIM}"
         )
@@ -188,31 +232,31 @@ class OLABot:
         return stats_message
 
     def print_welcome(self) -> None:
-        """Print welcome message."""
+        """Prints welcome message."""
         print(f"\n{Back.BLUE}{Fore.WHITE} CITIZEN GEMINI {Style.RESET_ALL}")
         print(f"{Fore.CYAN}Your AI Guide to the Ontario Legislature{Style.RESET_ALL}")
         print(f"{Fore.CYAN}Type 'quit' to exit{Style.RESET_ALL}\n")
 
     def print_question(self, question: str) -> None:
-        """Print user question with styling."""
+        """Prints user question with styling."""
         print(f"\n{Fore.GREEN}❓ You: {Style.BRIGHT}{question}{Style.RESET_ALL}")
 
     def print_response(self, response: str | Generator) -> None:
-        """Print bot response with styling."""
+        """Prints bot response with styling."""
         if self.streaming:
             # Print assistant prefix only once
-            print(f"\n{Fore.BLUE}🤖 Assistant: {Style.NORMAL}", end="", flush=True)
+            print(f"\n{Fore.BLUE}🤖 OLABot: {Style.NORMAL}", end="", flush=True)
             for chunk in response:
                 print(f"{Fore.BLUE}{chunk}", end="", flush=True)
             print(f"\n\n{Style.DIM}---{Style.RESET_ALL}")  # Separator line
         else:
             print(
-                f"\n{Fore.BLUE}🤖 Assistant: {Style.NORMAL}{response}{Style.RESET_ALL}\n"
+                f"\n{Fore.BLUE}🤖 OLABot: {Style.NORMAL}{response}{Style.RESET_ALL}\n"
             )
             print(f"{Style.DIM}---{Style.RESET_ALL}")  # Separator line
 
     #
-    # GEMINI METHODS
+    # GEMINI INIT METHODS
     #
     def _create_cached_model(
         self,
@@ -220,21 +264,21 @@ class OLABot:
         display_name: str,
         contents: list[str],
         **kwargs,
-    ) -> tuple[genai.GenerativeModel, caching.CachedContent | None]:
+    ) -> tuple[genai.GenerativeModel, genai.caching.CachedContent | None]:
         """Create a Gemini model with cached content.
 
         Args:
-            model_name: Name of the Gemini model to use
-            display_name: Display name for the cached content
-            contents: List of content strings to cache
+            model_name (str): Name of the Gemini model to use
+            display_name (str): Display name for the cached content
+            contents (List[str]): List of content strings to cache
             **kwargs: Additional configuration parameters for the model
 
         Returns:
-            Tuple of (GenerativeModel, CachedContent)
+            Tuple[GenerativeModel, CachedContent]
         """
 
         # Create new cache
-        cached_content = caching.CachedContent.create(
+        cached_content = genai.caching.CachedContent.create(
             model=model_name,
             display_name=display_name,
             contents=contents,
@@ -259,8 +303,7 @@ class OLABot:
         Resets self.chat_session.
         """
 
-        system_prompt =\
-        """
+        system_prompt = """
         You are a helpful assistant making the Ontario Legislative Assembly more accessible to average citizens.
 
         IMPORTANT: You have persistent access to cached Ontario Legislative Assembly documents, including transcripts and bills.
@@ -334,7 +377,7 @@ class OLABot:
         # Create new model using helper function
         self.model, self.current_context_cache = self._create_cached_model(
             model_name=self.MAIN_MODEL_NAME,
-            display_name="OLABot Current Transcripts",
+            display_name="OLABot",
             contents=[self.current_context],
             temperature=1,
             max_output_tokens=8192,
@@ -362,8 +405,7 @@ class OLABot:
             else ""
         )
 
-        prompt =\
-        f"""
+        prompt = f"""
         QUESTION: "{question}"
 
         CONTEXT INFORMATION:
@@ -517,8 +559,8 @@ class OLABot:
 
         response = self.retrieval_model.generate_content(prompt)
         response_dct = parse_llm_json(response.text)
-        decision = response_dct['decision']
-        reasoning = response_dct['reasoning']
+        decision = response_dct["decision"]
+        reasoning = response_dct["reasoning"]
         self._print_debug(self.current_document_ids)
         self._print_debug(self._format_usage_stats(response.usage_metadata))
         self._print_debug(f"Checking context relevance decision: {decision}")
@@ -531,8 +573,7 @@ class OLABot:
     def _select_relevant_documents(self, question: str) -> list[str]:
         """Select relevant transcripts based on question and available summaries."""
 
-        prompt =\
-        f"""
+        prompt = f"""
         Given the following question about the Ontario Legislature, and using the document summaries provided in your context,
         select the most relevant documents to help you answer the question.
 
@@ -642,10 +683,14 @@ class OLABot:
         # so try to print as much detail as possible
         except Exception as e:
             exc_type, exc_value, exc_traceback = sys.exc_info()
-            self._print_debug(''.join(traceback.format_exception_only(exc_type, exc_value)).strip())
-            self._print_debug(''.join(traceback.format_tb(exc_traceback)))
+            self._print_debug(
+                "".join(traceback.format_exception_only(exc_type, exc_value)).strip()
+            )
+            self._print_debug("".join(traceback.format_tb(exc_traceback)))
 
-            error_msg = f"{Fore.RED}Sorry, I encountered an error: {e!s}{Style.RESET_ALL}"
+            error_msg = (
+                f"{Fore.RED}Sorry, I encountered an error: {e!s}{Style.RESET_ALL}"
+            )
             if self.streaming:
                 yield error_msg
             else:
