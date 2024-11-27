@@ -650,7 +650,7 @@ class OLABot:
             self._print_debug(f"Error generating response: {str(e)}")
             raise
 
-    def chat_interface(self, question: str) -> str | Generator:
+    def chat_interface(self, question: str) -> Generator:
         """Main chat interface."""
         try:
             # Check if current context is relevant
@@ -669,7 +669,7 @@ class OLABot:
                 response = self._generate_response(question)
 
             if not self.streaming:
-                return response
+                yield response
 
             # handle streaming
             full_response = ""
@@ -691,10 +691,7 @@ class OLABot:
             error_msg = (
                 f"{Fore.RED}Sorry, I encountered an error: {e!s}{Style.RESET_ALL}"
             )
-            if self.streaming:
-                yield error_msg
-            else:
-                return error_msg
+            yield error_msg
 
 
 def main():
@@ -713,7 +710,10 @@ def main():
 
             bot.print_question(question)
             bot._print_debug(datetime.datetime.now(tz=TZ).time())
-            response = bot.chat_interface(question)
+            if not bot.streaming:
+                response = next(bot.chat_interface(question))
+            if bot.streaming:
+                response = bot.chat_interface(question)
             bot.print_response(response)
     except KeyboardInterrupt:
         bot._print_debug("Interrupted by user.")
