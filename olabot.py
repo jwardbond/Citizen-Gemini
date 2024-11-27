@@ -421,6 +421,7 @@ class OLABot:
         - Previous questions from the user
         - The main assistant's answers to those questions
         - Most recent exchange used these loaded documents
+        {conversation_history}
 
         EVALUATION STEPS:
         1. READ the main assistant's last answer carefully - what information was already provided?
