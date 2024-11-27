@@ -44,13 +44,13 @@ The main model, however, requires a cache of the transcripts themselves. This is
 ```mermaid
 flowchart LR
     A[Initialize Models] --> B[Question Asked]
-    B --> C{Check Context Relevance}
-    C -->|Need New Context| D[Select Relevant Transcripts]
-    D --> E[New cache & model <br> Carry over history]
-    E --> F[Generate Response]
-    C -->|Current Context Sufficient| F
+    B --> C{_check_context_relevance}
+    C -->|LOAD_NEW_CONTEXT| D[_select_relevant_transcripts]
+    D --> E[_update_current_context]
+    E --> F[_generate_resposne]
+    C -->|USE_CURRENT_CONTEXT| F
 ```
-
+1
 ## Initialization
 
 The bot reads a JSON file containing Hansard transcripts. It then processes them for easier searching and retrieval (see `_generate_transcript_summaries`). It also initializes two models: `model` and `retrieval_model`, which are Gemini Flash and Gemini Flash 8B respectively, used for different tasks (note this is easily changeable by modifying some constants).
