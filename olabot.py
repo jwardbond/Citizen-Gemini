@@ -29,6 +29,8 @@ def list_models():
         print(f"Supported generation methods: {m.supported_generation_methods}")
         print("---")
 
+list_models()
+
 
 def list_all_caches():
     """List all active caches"""
@@ -706,7 +708,7 @@ def main():
     delete_all_caches()
 
     # Initialize bot
-    bot = OLABot("./documents.json", "./summaries.json", debug = args.debug, streaming = not args.streaming)
+    bot = OLABot("./documents.json", "./summaries.json", debug = args.debug, streaming = not args.no_streaming)
     bot.print_welcome()
 
     try:
