@@ -29,9 +29,6 @@ def list_models():
         print(f"Supported generation methods: {m.supported_generation_methods}")
         print("---")
 
-list_models()
-
-
 def list_all_caches():
     """List all active caches"""
     for c in genai.caching.CachedContent.list():
