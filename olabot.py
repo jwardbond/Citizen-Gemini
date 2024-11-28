@@ -696,11 +696,17 @@ class OLABot:
 
 
 def main():
+    # Parse CLI arguments
+    parser = argparse.ArgumentParser(description="CLI with debug and streaming options")
+    parser.add_argument("--debug", action="store_true", help="Enable debug mode")
+    parser.add_argument("--no-streaming", action="store_true", help="Disable streaming mode")
+    args = parser.parse_args()
+
     # Clear all caches in the cloud
     delete_all_caches()
 
     # Initialize bot
-    bot = OLABot("./documents.json", "./summaries.json", debug=True)
+    bot = OLABot("./documents.json", "./summaries.json", debug = args.debug, streaming = not args.streaming)
     bot.print_welcome()
 
     try:
@@ -730,4 +736,5 @@ def main():
 
 
 if __name__ == "__main__":
+    import argparse
     main()
