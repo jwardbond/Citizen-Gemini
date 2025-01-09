@@ -8,4 +8,4 @@
 
 ## Our Solution: Smart Context Management
 
-**FILL THIS IN**
+We use two different LLM models: one that helps to retrieve relevant content, and one that answers the question. We leverage Gemini's context caching to cut down on costs and compute time. See `docs.md` for more details.
